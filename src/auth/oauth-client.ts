@@ -1,4 +1,5 @@
 import { createRemoteJWKSet, jwtVerify, type JWTVerifyGetKey } from "jose";
+import axios, { type AxiosAdapter } from "axios";
 import type { Config } from "../config.js";
 import { parseProfile, validSubject, type Profile } from "./profile.js";
 
@@ -20,22 +21,31 @@ export class ProviderError extends Error {
 export class InvalidIdentityError extends Error {
   constructor() { super("Invalid Rita ID identity."); }
 }
+export class AccessExpiredError extends InvalidIdentityError {}
 const record = (v: unknown): v is Record<string, unknown> =>
   typeof v === "object" && v !== null && !Array.isArray(v);
 
 export function createOAuthClient(config: Config, options: {
-  fetch?: typeof fetch; key?: JWTVerifyGetKey; now?: () => number; timeoutMs?: number;
+  adapter?: AxiosAdapter; key?: JWTVerifyGetKey; now?: () => number; timeoutMs?: number;
 } = {}): OAuthClient {
-  const request = options.fetch ?? fetch;
   const now = options.now ?? Date.now;
   const timeoutMs = options.timeoutMs ?? 10_000;
+  const http = axios.create({ timeout: timeoutMs, maxRedirects: 0,
+    responseType: "text", transformResponse: [], validateStatus: () => true,
+    ...(options.adapter ? { adapter: options.adapter } : {}),
+  });
   const key = options.key ?? createRemoteJWKSet(
     new URL(config.apiUrl + "/.well-known/jwks.json"), { timeoutDuration: timeoutMs },
   );
   async function send(path: string, init: RequestInit): Promise<Response> {
-    const response = await request(config.apiUrl + path, {
-      ...init, signal: AbortSignal.timeout(timeoutMs), redirect: "error",
-    });
+    let response: Response;
+    try {
+      const result = await http.request({ url: config.apiUrl + path,
+        method: init.method ?? "GET", headers: Object.fromEntries(new Headers(init.headers)),
+        data: init.body, signal: AbortSignal.timeout(timeoutMs),
+      });
+      response = new Response(result.status === 204 ? null : result.data, { status: result.status });
+    } catch { throw new ProviderError("transport_error", 503); }
     if (!response.ok) {
       const data: unknown = await response.json().catch(() => null);
       const allowed = ["temporarily_unavailable", "invalid_grant", "invalid_client",
@@ -76,6 +86,11 @@ export function createOAuthClient(config: Config, options: {
       // A JWKS outage is retryable with the SAME new access token, not another rotation.
       const code = (error as { code?: string }).code;
       if (code === "ERR_JWKS_TIMEOUT" || error instanceof TypeError) throw error;
+      if (code === "ERR_JWT_EXPIRED") {
+        const expired = (error as { payload: { sub?: unknown; isClient?: unknown } }).payload;
+        if (validSubject(expired.sub) && expired.isClient !== true &&
+            (expectedSubject === undefined || expired.sub === expectedSubject)) throw new AccessExpiredError();
+      }
       throw new InvalidIdentityError();
     }
     if (!validSubject(payload.sub) || payload.isClient === true ||
@@ -83,9 +98,18 @@ export function createOAuthClient(config: Config, options: {
         (expectedSubject !== undefined && payload.sub !== expectedSubject)) {
       throw new InvalidIdentityError();
     }
-    const data: unknown = await (await send("/auth/oauth/userinfo", {
-      headers: { Authorization: "Bearer " + tokens.accessToken, Accept: "application/json" },
-    })).json();
+    let data: unknown;
+    try {
+      data = await (await send("/auth/oauth/userinfo", {
+        headers: { Authorization: "Bearer " + tokens.accessToken, Accept: "application/json" },
+      })).json();
+    } catch (error) {
+      if (error instanceof ProviderError && error.status === 401 && payload.exp * 1000 <= now()) {
+        throw new AccessExpiredError();
+      }
+      throw error;
+    }
+    if (payload.exp * 1000 <= now()) throw new AccessExpiredError();
     try {
       const profile = parseProfile(data, payload.sub);
       if (payload.exp * 1000 <= now()) throw new InvalidIdentityError();

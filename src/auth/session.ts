@@ -1,4 +1,4 @@
-import type { Request, RequestHandler } from "express";
+import type { Request, RequestHandler, Response } from "express";
 import session from "express-session";
 import type { Config } from "../config.js";
 import type { Identity } from "./oauth-client.js";
@@ -26,3 +26,12 @@ export const saveSession = (req: Request): Promise<void> =>
   new Promise((resolve, reject) => req.session.save(error => error ? reject(error) : resolve()));
 export const regenerateSession = (req: Request): Promise<void> =>
   new Promise((resolve, reject) => req.session.regenerate(error => error ? reject(error) : resolve()));
+
+export async function destroySession(req: Request, res: Response) {
+  const secure = req.session?.cookie.secure === true;
+  if (req.session) await new Promise<void>((resolve, reject) =>
+    req.session.destroy(error => error ? reject(error) : resolve()));
+  res.clearCookie(cookieName, { httpOnly: true, sameSite: "lax", secure, path: "/" });
+}
+export const wantsJson = (req: Request) => req.path.startsWith("/api/") ||
+  req.get("Accept")?.includes("application/json") === true;

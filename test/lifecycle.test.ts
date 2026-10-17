@@ -5,7 +5,7 @@ import request from "supertest";
 import session from "express-session";
 import { generateKeyPair, SignJWT, createLocalJWKSet, exportJWK } from "jose";
 import { createApp } from "../src/app.js";
-import { createOAuthClient } from "../src/auth/oauth-client.js";
+import { createOAuthClient } from "./provider-fixture.js";
 import { readConfig } from "../src/config.js";
 
 const keys = await generateKeyPair("RS256");
@@ -106,7 +106,7 @@ test("automatic refresh extends access but not local deadline and updates profil
   const f = fixture();
   await f.login();
   const before = (await f.agent.get("/api/session").expect(200)).body;
-  f.advance(280_000);
+  f.advance(300_000);
   f.state.name = "Updated Employee";
   await f.agent.get("/api/me").expect(200).expect(r => assert.equal(r.body.name, "Updated Employee"));
   const after = (await f.agent.get("/api/session").expect(200)).body;
@@ -116,6 +116,102 @@ test("automatic refresh extends access but not local deadline and updates profil
   assert.equal(after.sessionExpiresAt, before.sessionExpiresAt);
   assert.ok(after.accessExpiresAt > before.accessExpiresAt);
   assert.deepEqual(after.scopes, ["openid", "profile", "email"]);
+});
+
+test("every private request fetches fresh profile without early rotation or cookie replacement", async () => {
+  const f = fixture();
+  await f.login();
+  const initial = f.state.userinfos;
+  f.state.name = "First profile";
+  await f.agent.get("/api/me").expect(200).expect(r => assert.equal(r.body.name, "First profile"));
+  f.state.name = "New profile";
+  f.advance(280_000);
+  const response = await f.agent.get("/api/me").expect(200);
+  assert.equal(response.body.name, "New profile");
+  assert.equal(response.headers["set-cookie"], undefined);
+  assert.equal(f.state.userinfos, initial + 2);
+  assert.equal(f.state.refreshes, 0);
+  await f.agent.get("/api/private/example").expect(200).expect(r => assert.equal(r.body.subject, subject));
+  assert.equal(f.state.userinfos, initial + 3);
+});
+
+test("JSON refresh and logout retain the cookie until logout, require CSRF and expose no tokens", async () => {
+  const f = fixture();
+  const { csrf, cookie } = await f.login();
+  await f.agent.post("/auth/refresh").set("Accept", "application/json").send({}).expect(403);
+  const refreshed = await f.agent.post("/auth/refresh").set("Accept", "application/json").send({ csrf }).expect(200);
+  assert.equal(refreshed.body.profile.sub, subject);
+  assert.equal(refreshed.body.session.refreshCount, 1);
+  assert.equal(refreshed.headers["set-cookie"], undefined);
+  for (const token of f.state.issued) assert.ok(!JSON.stringify(refreshed.body).includes(token));
+  const logout = await f.agent.post("/auth/logout").set("Accept", "application/json").send({ csrf })
+    .expect(200, { loggedOut: true, revokeConfirmed: true });
+  assert.match(String(logout.headers["set-cookie"]), /Expires=Thu, 01 Jan 1970/);
+  await request(f.app).get("/api/private/example").set("Cookie", cookie).expect(401);
+});
+
+test("userinfo rejection with unexpired JWT never refreshes and clears the browser session", async () => {
+  const f = fixture();
+  await f.login();
+  f.state.beforeUserinfo = async () => new Response(null, { status: 401 });
+  const response = await f.agent.get("/api/private/example").expect(401);
+  assert.match(String(response.headers["set-cookie"]), /Expires=Thu, 01 Jan 1970/);
+  assert.equal(f.state.refreshes, 0);
+  await f.agent.get("/api/session").expect(401);
+});
+
+test("userinfo 403 denies the resource without refresh or destroying the session", async () => {
+  const f = fixture();
+  await f.login();
+  f.state.beforeUserinfo = async () => new Response(null, { status: 403 });
+  await f.agent.get("/api/private/example").expect(403, { error: "forbidden" });
+  await f.agent.get("/api/session").expect(200);
+  assert.equal(f.state.refreshes, 0);
+  f.state.beforeUserinfo = undefined;
+  await f.agent.get("/api/me").expect(200);
+});
+
+test("userinfo outage without rotation preserves session and recovers after cooldown", async () => {
+  const f = fixture();
+  await f.login();
+  f.state.beforeUserinfo = async () => new Response(null, { status: 503 });
+  await f.agent.get("/api/me").expect(503).expect("Retry-After", "5");
+  await f.agent.get("/api/session").expect(200);
+  f.state.beforeUserinfo = undefined;
+  f.advance(5_000);
+  await f.agent.get("/api/me").expect(200);
+  assert.equal(f.state.refreshes, 0);
+});
+
+test("expiry during userinfo refreshes once before the private handler", async () => {
+  const f = fixture();
+  await f.login();
+  f.state.beforeUserinfo = async () => {
+    f.state.beforeUserinfo = undefined;
+    f.advance(300_000);
+    return new Response(null, { status: 401 });
+  };
+  const response = await f.agent.get("/api/private/example").expect(200);
+  assert.equal(response.body.subject, subject);
+  assert.equal(f.state.refreshes, 1);
+});
+
+test("late failure from an old token cannot invalidate a concurrently refreshed session", async () => {
+  const f = fixture();
+  const { csrf, cookie } = await f.login();
+  const started = deferred(), release = deferred();
+  f.state.beforeUserinfo = async () => {
+    f.state.beforeUserinfo = undefined;
+    started.resolve(); await release.promise;
+    return new Response(null, { status: 401 });
+  };
+  const oldRequest = request(f.app).get("/api/me").set("Cookie", cookie).then(r => r);
+  await started.promise;
+  await f.agent.post("/auth/refresh").set("Accept", "application/json").send({ csrf }).expect(200);
+  release.resolve();
+  assert.equal((await oldRequest).status, 200);
+  assert.equal(f.state.refreshes, 1);
+  await f.agent.get("/api/me").expect(200);
 });
 
 test("manual refresh requires CSRF, rotates every deliberate request and never calls direct auth refresh", async () => {
@@ -135,7 +231,7 @@ test("manual refresh requires CSRF, rotates every deliberate request and never c
 test("concurrent automatic and manual requests share one rotation", async () => {
   const f = fixture();
   const { csrf, cookie } = await f.login();
-  f.advance(280_000);
+  f.advance(300_000);
   const entered = deferred(), release = deferred();
   f.state.beforeRefresh = async () => { entered.resolve(); await release.promise; };
   const first = request(f.app).get("/api/me").set("Cookie", cookie).then(r => r);
@@ -158,7 +254,7 @@ test("HRM 503 keeps refresh token, imposes cooldown and safely retries", async (
   const f = fixture();
   await f.login();
   const previous = f.state.currentRefresh;
-  f.advance(280_000);
+  f.advance(300_000);
   f.state.beforeRefresh = async () => Response.json({ error: "temporarily_unavailable", error_description: "private" }, { status: 503 });
   await f.agent.get("/api/me").expect(503, { error: "temporarily_unavailable" }).expect("Retry-After", "5");
   await f.agent.get("/api/me").expect(503);
@@ -174,7 +270,7 @@ test("HRM 503 keeps refresh token, imposes cooldown and safely retries", async (
 test("userinfo outage after rotation retries the NEW access token without rotating again", async () => {
   const f = fixture();
   await f.login();
-  f.advance(280_000);
+  f.advance(300_000);
   f.state.beforeUserinfo = async () => new Response("private upstream detail", { status: 503 });
   await f.agent.get("/api/me").expect(503);
   const status = (await f.agent.get("/api/session").expect(200)).body;
@@ -194,7 +290,7 @@ for (const failure of ["timeout", "lost-response", "malformed-json", "missing-re
     const f = fixture();
     await f.login();
     const previous = f.state.currentRefresh;
-    f.advance(280_000);
+    f.advance(300_000);
     f.state.afterRefresh = async () => {
       if (failure === "timeout") throw new DOMException("private timeout", "TimeoutError");
       if (failure === "lost-response") throw new TypeError("private network detail");
@@ -212,7 +308,7 @@ test("invalid_grant ends session; configuration errors remain explicit without r
   for (const code of ["invalid_grant", "invalid_client", "invalid_scope", "unauthorized_client"]) {
     const f = fixture();
     await f.login();
-    f.advance(280_000);
+    f.advance(300_000);
     f.state.beforeRefresh = async () => Response.json({ error: code, error_description: "private provider message" }, { status: code === "invalid_client" ? 401 : 400 });
     const status = code === "invalid_grant" ? 401 : 502;
     await f.agent.get("/api/me").expect(status, { error: code === "invalid_grant" ? "not_authenticated" : "integration_error" });
@@ -225,7 +321,7 @@ test("invalid_grant ends session; configuration errors remain explicit without r
 test("refresh refuses changed JWT subject and revokes replacement", async () => {
   const f = fixture();
   await f.login();
-  f.advance(280_000);
+  f.advance(300_000);
   f.state.subject = otherSubject;
   await f.agent.get("/api/me").expect(401);
   assert.deepEqual(f.state.revoked, [f.state.currentRefresh]);
@@ -235,7 +331,7 @@ test("refresh refuses changed JWT subject and revokes replacement", async () => 
 test("refresh refuses mismatched userinfo and revokes replacement", async () => {
   const f = fixture();
   await f.login();
-  f.advance(280_000);
+  f.advance(300_000);
   f.state.beforeUserinfo = async () => Response.json({ _id: otherSubject });
   await f.agent.get("/api/me").expect(401);
   assert.deepEqual(f.state.revoked, [f.state.currentRefresh]);
@@ -255,7 +351,7 @@ test("without refresh token expiry requires login and UI explains the limitation
 test("absolute local expiry revokes current token even when it can refresh", async () => {
   const f = fixture({ lifetime: 600_000 });
   await f.login();
-  f.advance(280_000);
+  f.advance(300_000);
   await f.agent.get("/api/me").expect(200);
   const current = f.state.currentRefresh;
   f.advance(320_001);
@@ -266,7 +362,7 @@ test("absolute local expiry revokes current token even when it can refresh", asy
 test("logout waits for refresh and revokes latest token; old cookie cannot restore session", async () => {
   const f = fixture();
   const { cookie, csrf } = await f.login();
-  f.advance(280_000);
+  f.advance(300_000);
   const entered = deferred(), release = deferred();
   f.state.beforeRefresh = async () => { entered.resolve(); await release.promise; };
   const refresh = request(f.app).get("/api/me").set("Cookie", cookie).then(r => r);
@@ -343,7 +439,7 @@ test("credentials and private profile never reach logs, cookies, or Express sess
 test("logout after failed refresh verification revokes replacement even before retry", async () => {
   const f = fixture();
   const { csrf } = await f.login();
-  f.advance(280_000);
+  f.advance(300_000);
   f.state.beforeUserinfo = async () => new Response("", { status: 503 });
   await f.agent.get("/api/me").expect(503);
   await f.agent.post("/auth/logout").type("form").send({ csrf }).expect(303);
@@ -354,7 +450,7 @@ test("logout after failed refresh verification revokes replacement even before r
 test("expired replacement during verification recovery ends session without another rotation", async () => {
   const f = fixture();
   await f.login();
-  f.advance(280_000);
+  f.advance(300_000);
   f.state.beforeUserinfo = async () => new Response("", { status: 503 });
   await f.agent.get("/api/me").expect(503);
   f.advance(301_000);
@@ -364,14 +460,15 @@ test("expired replacement during verification recovery ends session without anot
   assert.deepEqual(f.state.revoked, [f.state.currentRefresh]);
 });
 
-test("unconfirmed revoke on failed refresh remains visible at logout", async () => {
+test("failed refresh destroys the local session even if revoke fails", async () => {
   const f = fixture();
   const { csrf } = await f.login();
-  f.advance(280_000);
+  f.advance(300_000);
   f.state.beforeRefresh = async () => Response.json({ error: "invalid_grant" }, { status: 400 });
   f.state.revokeFails = true;
   await f.agent.get("/api/me").expect(401);
-  await f.agent.post("/auth/logout").type("form").send({ csrf }).expect(303).expect("Location", "/?notice=revoke_unconfirmed");
+  await f.agent.post("/auth/logout").type("form").send({ csrf }).expect(403);
+  await f.agent.get("/api/session").expect(401);
 });
 
 test("idle expiry cleanup revokes without a browser request", async () => {

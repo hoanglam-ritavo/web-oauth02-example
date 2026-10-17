@@ -1,5 +1,5 @@
 import type { Authorization, Identity, OAuthClient, TokenSet } from "./oauth-client.js";
-import { InvalidIdentityError, ProviderError } from "./oauth-client.js";
+import { AccessExpiredError, InvalidIdentityError, ProviderError } from "./oauth-client.js";
 
 export class SessionError extends Error {
   constructor(readonly code: string, readonly status: number, readonly retryAfter?: number) {
@@ -21,6 +21,7 @@ interface Entry {
   deadline: number;
   closing: boolean;
   pending: boolean;
+  version: number;
   retryAt: number;
   refreshCount: number;
   lastRefreshAt: number | null;
@@ -43,7 +44,7 @@ export class OAuthSessions {
     const entry: Entry = {
       identity: { profile: authorization.profile, expiresAt: authorization.expiresAt },
       tokens: authorization.tokens, deadline: effectiveDeadline, closing: false,
-      pending: false, retryAt: 0, refreshCount: 0, lastRefreshAt: null,
+      pending: false, version: 0, retryAt: 0, refreshCount: 0, lastRefreshAt: null,
     };
     this.entries.set(id, entry);
     // Cleanup only, never background refresh. Expire even if the browser stops visiting.
@@ -78,16 +79,72 @@ export class OAuthSessions {
 
   async resolve(id: string, force = false): Promise<Identity> {
     const e = await this.entry(id);
+    const version = e.version;
     if (e.failure) throw e.failure;
-    if (e.flight) await e.flight;
-    else if (e.pending || (e.tokens.refreshToken && (force || e.identity.expiresAt - this.now() < 30_000))) {
+    let updated = false;
+    const update = async () => {
+      if (e.closing || e.deadline <= this.now()) throw unauthenticated();
+      if (e.failure) throw e.failure;
+      if (e.flight) { await e.flight; return; }
+      if (e.version !== version && !e.pending) return;
+      if (!e.pending && !e.tokens.refreshToken) throw unauthenticated();
       if (e.retryAt > this.now()) {
         throw new SessionError("temporarily_unavailable", 503, Math.ceil((e.retryAt - this.now()) / 1000));
       }
       e.flight = this.update(e);
-      try { await e.flight; } finally { e.flight = undefined; }
-    } else if (force && !e.tokens.refreshToken) {
+      try { await e.flight; updated = true; } finally { e.flight = undefined; }
+    };
+    if (e.flight) await e.flight;
+    else if (force && !e.tokens.refreshToken && !e.pending) {
       throw new SessionError("refresh_unavailable", 409);
+    }
+    else if (e.pending || force) await update();
+    try {
+      if (e.failure) throw e.failure;
+      if (!updated) {
+        if (e.retryAt > this.now()) throw new SessionError("temporarily_unavailable", 503,
+          Math.ceil((e.retryAt - this.now()) / 1000));
+        let identity: Identity;
+        // A manual rotation may finish while this request is waiting on userinfo.
+        // Never commit an identity or failure obtained with superseded credentials.
+        const verifyCurrent = async (): Promise<Identity> => {
+          for (let attempt = 0; attempt < 2; attempt++) {
+            if (e.flight) await e.flight;
+            if (e.closing) throw unauthenticated();
+            if (e.failure) throw e.failure;
+            const currentVersion = e.version;
+            try {
+              const result = await this.oauth.verify(e.tokens, e.identity.profile.sub);
+              if (e.flight || e.version !== currentVersion) continue;
+              return result;
+            } catch (error) {
+              if (e.flight || e.version !== currentVersion) continue;
+              throw error;
+            }
+          }
+          throw new SessionError("temporarily_unavailable", 503, 1);
+        };
+        try { identity = await verifyCurrent(); }
+        catch (error) {
+          if (!(error instanceof AccessExpiredError)) throw error;
+          await update();
+          identity = updated ? e.identity : await verifyCurrent();
+        }
+        if (identity.profile.sub !== e.identity.profile.sub || !Number.isFinite(identity.expiresAt) ||
+            identity.expiresAt <= this.now()) throw new InvalidIdentityError();
+        if (!e.closing) e.identity = identity;
+      }
+    } catch (error) {
+      if (error instanceof SessionError) throw error;
+      if (error instanceof ProviderError && error.status === 403) throw new SessionError("forbidden", 403);
+      if (error instanceof InvalidIdentityError ||
+          (error instanceof ProviderError && [400, 401].includes(error.status))) {
+        e.failure = unauthenticated();
+        await this.discard(e);
+        throw e.failure;
+      }
+      e.retryAt = this.now() + 5_000;
+      throw new SessionError("temporarily_unavailable", 503, 5);
     }
     if (e.closing || e.deadline <= this.now() || e.identity.expiresAt <= this.now()) {
       if (!e.closing) await this.close(id);
@@ -102,6 +159,7 @@ export class OAuthSessions {
       try {
         // Commit replacement credentials BEFORE any JWT/userinfo await.
         e.tokens = await this.oauth.refresh(e.tokens.refreshToken!);
+        e.version++;
         e.pending = true;
       } catch (error) {
         if (error instanceof ProviderError && error.status === 503 && error.code === "temporarily_unavailable") {
@@ -130,8 +188,9 @@ export class OAuthSessions {
       e.refreshCount++;
       e.lastRefreshAt = this.now();
     } catch (error) {
+      if (error instanceof ProviderError && error.status === 403) throw new SessionError("forbidden", 403);
       if (error instanceof InvalidIdentityError ||
-          (error instanceof ProviderError && [400, 401, 403].includes(error.status))) {
+          (error instanceof ProviderError && [400, 401].includes(error.status))) {
         e.failure = unauthenticated();
         await this.discard(e);
         throw e.failure;

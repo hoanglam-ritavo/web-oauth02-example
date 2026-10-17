@@ -4,9 +4,9 @@ import type { OAuthClient } from "./oauth-client.js";
 import type { PendingClaims } from "./pending-claims.js";
 import { OAuthSessions, SessionError } from "./oauth-sessions.js";
 import { same } from "./security.js";
-import { cookieName, sessionCookie } from "./session.js";
+import { cookieName, sessionCookie, wantsJson } from "./session.js";
 import { RitaAuthStrategy, RitaAuthError } from "./rita-auth.strategy.js";
-import { page } from "../views/page.js";
+import { renderPage } from "../views/page.js";
 
 export function createAuthRouter(options: {
   config: Config; oauth: OAuthClient; now: () => number;
@@ -27,7 +27,7 @@ export function createAuthRouter(options: {
       return;
     }
     if (callbackResponse === "json") res.status(error.status).json({ error: error.code });
-    else res.status(error.status).type("html").send(page(undefined, undefined, error.message));
+    else renderPage(res.status(error.status), undefined, error.message);
   };
   router.use("/auth/callback", callbackError);
   const csrf: RequestHandler = (req, res, next) => {
@@ -41,8 +41,9 @@ export function createAuthRouter(options: {
   router.post("/auth/refresh", csrf, async (req, res, next) => {
     try {
       if (!req.session.oauthId || req.session.oauthId !== req.sessionID) throw new SessionError("not_authenticated", 401);
-      await sessions.resolve(req.session.oauthId, true);
-      res.redirect(303, "/");
+      const identity = await sessions.resolve(req.session.oauthId, true);
+      if (wantsJson(req)) res.json({ profile: identity.profile, session: await sessions.status(req.session.oauthId) });
+      else res.redirect(303, "/");
     } catch (error) { next(error); }
   });
   router.post("/auth/logout", csrf, async (req, res, next) => {
@@ -53,7 +54,8 @@ export function createAuthRouter(options: {
     req.session.destroy(error => {
       if (error) { next(error); return; }
       res.clearCookie(cookieName, sessionCookie(config));
-      res.redirect(303, revoked ? "/" : "/?notice=revoke_unconfirmed");
+      if (wantsJson(req)) res.json({ loggedOut: true, revokeConfirmed: revoked });
+      else res.redirect(303, revoked ? "/" : "/?notice=revoke_unconfirmed");
     });
   });
   return router;

@@ -10,7 +10,7 @@ import { readConfig } from "../src/config.js";
 const oauth = {
   async exchange(): Promise<never> { throw new Error("Unexpected exchange"); },
   async refresh(): Promise<never> { throw new Error("Unexpected refresh"); },
-  async verify(): Promise<never> { throw new Error("Unexpected verify"); },
+  async verify() { return { profile, expiresAt: Date.now() + 60_000 }; },
   async revoke() {},
 };
 const config = readConfig({
@@ -37,7 +37,7 @@ test("guard rejects missing session even with a bearer header or stale request a
 test("guard independently enforces expiry and exposes only profile and expiry", async () => {
   let time = Date.now();
   const expiresAt = time + 60_000;
-  const sessions = new OAuthSessions(oauth, () => time);
+  const sessions = new OAuthSessions({ ...oauth, async verify() { return { profile, expiresAt }; } }, () => time);
   const app = express();
   app.use(createSessionMiddleware(config));
   // Test-only login fixture; no expireIdentity middleware is installed.

@@ -6,7 +6,7 @@ import { createApp } from "../src/app.js";
 ﻿import { test } from "node:test";
 import assert from "node:assert/strict";
 import { generateKeyPair, SignJWT, createLocalJWKSet, exportJWK } from "jose";
-import { createOAuthClient } from "../src/auth/oauth-client.js";
+import { createOAuthClient } from "./provider-fixture.js";
 import { readConfig } from "../src/config.js";
 
 const config = readConfig({ RITA_CLIENT_ID: "client", RITA_CLIENT_SECRET: "secret", SESSION_SECRET: "x".repeat(32) });
@@ -202,17 +202,17 @@ test("real adapter keeps credentials outside Express session and revokes on logo
   const state = new URL(login.headers.location!).searchParams.get("state");
   await agent.get("/auth/callback").query({ state, code: "once" }).expect(302);
   const home = await agent.get("/").expect(200);
-  assert.ok(home.text.includes("<dd>false</dd>"));
-  assert.ok(home.text.includes("<dd>EMPLOYEE</dd>"));
+  assert.ok(home.text.includes('id="profile"'));
+  assert.ok(!home.text.includes("demo@example.com"));
   const me = await agent.get("/api/me").expect(200);
   assert.equal(me.body.sub, subject);
   time += 200_000;
   await agent.get("/api/me").expect(200);
-  assert.equal(calls.length, 2);
+  assert.equal(calls.length, 4);
   const csrf = /name="csrf" value="([^"]+)"/.exec(home.text)![1]!;
   await agent.post("/auth/logout").type("form").send({ csrf }).expect(303);
   await agent.get("/api/me").expect(401, { error: "not_authenticated" });
-  assert.equal(calls.length, 3);
+  assert.equal(calls.length, 5);
   assert.ok(saved.some(value => value.includes('"oauthId"')));
   for (const value of [...saved, home.text, JSON.stringify(me.body)]) {
     assert.ok(!value.includes(accessToken));

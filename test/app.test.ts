@@ -11,11 +11,25 @@ const config = readConfig({
 });
 const unusedOAuth = {
   async refresh(): Promise<never> { throw new Error("Unexpected refresh"); },
-  async verify(): Promise<never> { throw new Error("Unexpected verify"); },
+  async verify() { return { profile, expiresAt: Date.now() + 120_000 }; },
   async revoke() {},
 };
 const sub = "12345678-1234-4123-8123-123456789012";
 const profile = { sub, name: "Demo", email: "demo@example.com", employee_id: null, phone_number: null, is_developer: false, groups: "EMPLOYEE" as const };
+
+test("EJS escapes locals and serves same-origin browser assets under CSP", async () => {
+  const app = createApp(config);
+  const html = await new Promise<string>((resolve, reject) => app.render("page", {
+    csrf: '\"><script>window.injected=true</script>', message: '<img src=x onerror="bad()">', status: undefined,
+  }, (error, output) => error ? reject(error) : resolve(output)));
+  assert.doesNotMatch(html, /<img|<script>window/);
+  assert.match(html, /&lt;img/);
+  const home = await request(app).get("/").expect(200);
+  assert.match(home.headers["content-security-policy"]!, /script-src 'self'/);
+  for (const path of ["app.js", "app.css", "axios.min.js"]) {
+    await request(app).get("/assets/" + path).expect(200);
+  }
+});
 
 test("strategy JSON callback establishes a session usable by RitaAuthGuard", async () => {
   const time = Date.now();
@@ -87,7 +101,7 @@ async function begin(agent: ReturnType<typeof request.agent>) {
   return { response, url: new URL(response.headers.location!) };
 }
 
-test("login builds PKCE redirect, callback rotates session and renders escaped profile without tokens", async () => {
+test("login builds PKCE redirect, callback rotates session and renders a token-free EJS shell", async () => {
   const { agent, calls } = setup();
   const { response, url } = await begin(agent);
   assert.equal(url.origin, config.portalUrl);
@@ -114,7 +128,8 @@ test("login builds PKCE redirect, callback rotates session and renders escaped p
   assert.equal(me.headers["cache-control"], "no-store");
   assert.doesNotMatch(JSON.stringify(me.body), /access_token|refresh_token|id_token|client_secret/);
   const home = await agent.get("/").expect(200);
-  assert.match(home.text, /&lt;script&gt;/);
+  assert.match(home.text, /id="profile"/);
+  assert.doesNotMatch(home.text, /alert/);
   assert.doesNotMatch(home.text, /<script>/);
   await agent.get("/auth/callback").query({ state: url.searchParams.get("state"), code: "once" }).expect(400);
   assert.equal(calls.length, 1);
