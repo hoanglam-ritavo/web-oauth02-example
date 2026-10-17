@@ -1,30 +1,26 @@
-interface Claim {
-  sessionId: string;
-  expiresAt: number;
-}
+interface Claim { sessionId: string; expiresAt: number; active: boolean; claimed: boolean }
 
-// Each app owns its claims. Operations stay synchronous so concurrent callbacks
-// cannot both claim an attempt before session persistence completes.
 export function createPendingClaims(now: () => number) {
   const claims = new Map<string, Claim>();
+  const remove = (state: string) => {
+    const claim = claims.get(state);
+    if (claim) claim.active = false;
+    claims.delete(state);
+  };
+  const cancelSession = (sessionId: string) => {
+    for (const [state, claim] of claims) if (claim.sessionId === sessionId) remove(state);
+  };
   return {
     prune() {
-      for (const [state, claim] of claims)
-        if (claim.expiresAt <= now()) claims.delete(state);
+      for (const [state, claim] of claims) if (claim.expiresAt <= now()) remove(state);
     },
     replace(sessionId: string, state: string, expiresAt: number) {
-      // Invalidate overlapping login attempts for the same browser session.
-      for (const [previousState, claim] of claims)
-        if (claim.sessionId === sessionId) claims.delete(previousState);
-      claims.set(state, { sessionId, expiresAt });
+      cancelSession(sessionId);
+      claims.set(state, { sessionId, expiresAt, active: true, claimed: false });
     },
-    get(state: string): Claim | undefined {
-      return claims.get(state);
-    },
-    delete(state: string) {
-      claims.delete(state);
-    },
+    get: (state: string) => claims.get(state),
+    delete: remove,
+    cancelSession,
   };
 }
-
 export type PendingClaims = ReturnType<typeof createPendingClaims>;

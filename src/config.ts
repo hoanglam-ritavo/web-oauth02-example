@@ -1,5 +1,6 @@
-﻿export interface Config {
+export interface Config {
   port: number;
+  sessionMaxAgeMs: number;
   appUrl: string;
   portalUrl: string;
   /** HTTP(S) base URL, optionally with a path, without a trailing slash. */
@@ -70,9 +71,13 @@ export function readConfig(env: NodeJS.ProcessEnv): Config {
     }
     return url.href.replace(/\/+$/, "");
   }
+  const sessionHours = Number(env.SESSION_MAX_AGE_HOURS ?? "8");
+  if (!Number.isFinite(sessionHours) || sessionHours <= 0 || sessionHours > 24)
+    throw new Error("SESSION_MAX_AGE_HOURS must be greater than 0 and at most 24.");
   const appUrl = origin("APP_BASE_URL", "http://localhost:3003");
   return {
     port,
+    sessionMaxAgeMs: sessionHours * 3_600_000,
     appUrl,
     portalUrl: origin("RITA_PORTAL_URL", "http://localhost:3000"),
     apiUrl: apiBaseUrl(),

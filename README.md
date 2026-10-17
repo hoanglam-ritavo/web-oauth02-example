@@ -1,18 +1,21 @@
-﻿# Rita OAuth Example
+# Rita OAuth Example
 
-App Express + TypeScript độc lập để kiểm chứng **Login with Rita Võ** bằng trình duyệt. Chỉ dùng development, không database, không tự refresh OAuth, không thay đổi Rita ID backend/portal.
+Ứng dụng Express + TypeScript minh họa **Login with Rita Võ** cho web có backend riêng
+(confidential client): login/consent, callback, phiên local, refresh rotation và revoke/logout.
+Chỉ dùng development, một tiến trình, không database. Production bị chặn.
 
 ## Chạy local
 
-Yêu cầu Node.js 24, npm, Rita ID Backend và Developer Portal đang chạy. Backend cần PostgreSQL/Odoo phù hợp cho login thực tế.
+Yêu cầu Node.js 24 và npm; Rita ID backend và developer portal đang hoạt động.
+Login Rita ID hiện xác thực trực tiếp HRM database bằng tài khoản/nhân viên đang active.
+Backend cần cả database internal và HRM có schema phù hợp. Demo không tự khởi động hoặc sửa chúng.
 
-1. Đăng nhập developer portal bằng tài khoản Odoo đang hoạt động. Register local hiện chưa cung cấp login bằng mật khẩu local.
-2. Tạo OAuth client trên portal:
-   - Name: `OAuth Example`.
-   - Callback/redirect URI: **`http://localhost:3003/auth/callback`** (khớp chính xác, không thêm dấu slash cuối).
-   - Allowed scopes: `openid`, `profile`, `email`.
-   - Ghi lại client ID và secret được trả khi tạo. Chỉ điền secret vào môi trường server.
-3. Trong thư mục project:
+1. Dùng tài khoản có quyền developer để tạo client trên portal. Client mặc định là
+   confidential; backend tự gán scopes `openid`, `profile`, `email`.
+2. Đăng ký chính xác callback **http://localhost:3003/auth/callback**, không thêm slash cuối.
+3. Ghi client ID và secret trả về lúc tạo vào môi trường server. Public client không phù hợp
+   với example này: backend từ chối public client gửi secret.
+4. Cài dependencies và tạo cấu hình nếu chưa có:
 
 ```powershell
 npm ci
@@ -20,69 +23,180 @@ Copy-Item .env.example .env
 node -e "console.log(require('node:crypto').randomBytes(32).toString('hex'))"
 ```
 
-Không ghi đè `.env` đã có. Dùng giá trị ngẫu nhiên vừa sinh cho `SESSION_SECRET`; điền `RITA_CLIENT_ID`, `RITA_CLIENT_SECRET` từ client vừa tạo. Các placeholder sẽ bị từ chối khi startup. Không commit `.env`.
+Không ghi đè .env hiện có. Dùng chuỗi ngẫu nhiên cho SESSION_SECRET, thay placeholders của client.
+Không commit hoặc gửi secret vào browser/log.
 
 ```powershell
 npm run dev
 ```
 
-Mở **http://localhost:3003** và bấm **Login with Rita Võ**.
+Mở **http://localhost:3003**. Không trộn localhost và 127.0.0.1 trong cùng luồng.
 
 ## Cấu hình
 
 | Biến | Mặc định / yêu cầu |
 | --- | --- |
-| NODE_ENV | Development/test; production bị chặn |
+| NODE_ENV | development/test; production bị chặn |
 | PORT | 3003 |
 | APP_BASE_URL | http://localhost:3003 |
 | RITA_PORTAL_URL | http://localhost:3000 |
 | RITA_API_URL | http://localhost:3000/api |
-| RITA_CLIENT_ID | Bắt buộc |
-| RITA_CLIENT_SECRET | Bắt buộc; chỉ dùng server-to-server |
-| SESSION_SECRET | Bắt buộc; ít nhất 32 ký tự, sinh ngẫu nhiên |
+| RITA_CLIENT_ID | Bắt buộc, confidential client |
+| RITA_CLIENT_SECRET | Bắt buộc, chỉ dùng phía server |
+| SESSION_SECRET | Bắt buộc, ngẫu nhiên và ít nhất 32 ký tự |
+| SESSION_MAX_AGE_HOURS | 8; số giờ lớn hơn 0, tối đa 24, cho phép phần thập phân |
 
-APP_BASE_URL và RITA_PORTAL_URL là origin HTTP(S), không path/query/fragment/credentials. RITA_API_URL là base URL HTTP(S), cho phép path và tự bỏ dấu `/` cuối; không cho phép query/fragment/credentials. Đổi PORT thì đổi APP_BASE_URL và đăng ký lại callback tương ứng.
+APP_BASE_URL và RITA_PORTAL_URL là origin HTTP(S), không path/query/fragment/credentials.
+RITA_API_URL cho phép path prefix, bỏ slash cuối, không query/fragment/credentials.
+Đổi port thì đồng bộ PORT, APP_BASE_URL và callback đã đăng ký. Placeholders bị từ chối.
 
-**Portal URL** dành cho điều hướng trình duyệt đến `/oauth/authorize`. **API URL** dành cho server gọi `/auth/oauth/token`, `/auth/oauth/userinfo` và `/.well-known/jwks.json`; không thêm `/api` vào URL backend trực tiếp.
+Browser đến portal /oauth/authorize. Server gọi các endpoint OAuth và JWKS qua RITA_API_URL:
 
-Mặc định, developer portal chạy port 3000 và rewrite `/api/:path*` sang backend `/:path*`. Với `RITA_API_URL=http://localhost:3000/api`, cả token, userinfo và JWKS được gọi qua `/api/auth/oauth/token`, `/api/auth/oauth/userinfo` và `/api/.well-known/jwks.json`. Proxy cần giữ nguyên body và header `Authorization`, không redirect các endpoint này, không cache token/userinfo hoặc ghi log credentials. Luồng OAuth sẽ phụ thuộc vào cả portal proxy và backend.
+| Cách nối | RITA_API_URL |
+| --- | --- |
+| Qua rewrite /api của developer portal | http://localhost:3000/api |
+| Trực tiếp backend, không thêm /api | http://localhost:4000 |
 
-Để gọi backend trực tiếp, đặt `RITA_API_URL=http://localhost:4000`. Chỉ sửa biến này trong `.env` đã có, giữ nguyên các secret; `.env.example` là mẫu, không phải cấu hình runtime. Restart app sau khi đổi env; các phiên MemoryStore cũ sẽ mất.
+Portal proxy phải chuyển nguyên body/Authorization, không redirect hoặc cache token/userinfo,
+không ghi credentials hay callback query vào log. Demo không cần CORS cho token requests vì
+chúng chạy server-to-server. RITA_ISSUER cũ bị bỏ qua; không có issuer giả định.
 
-Server mặc định chỉ nghe trên `127.0.0.1`. HTTP localhost là cấu hình được hướng dẫn và kiểm thử. Nếu dùng HTTPS local, cấu hình APP_BASE_URL là HTTPS và cung cấp TLS reverse proxy trên loopback chuyển tiếp `X-Forwarded-Proto`; app chỉ tin proxy loopback khi bật HTTPS. Không mở backend này trực tiếp ra mạng và không tin proxy tùy ý. Proxy không được ghi log query callback hoặc token. Project không tự cấp chứng chỉ hoặc triển khai TLS.
+Server chỉ listen 127.0.0.1. HTTPS local cần TLS reverse proxy trên loopback và
+X-Forwarded-Proto; app chỉ bật trust proxy loopback khi APP_BASE_URL là HTTPS.
+Cookie rita_example.sid là HTTP-only, SameSite=Lax, Path=/, không Domain và Secure khi HTTPS.
+Cookie không cách ly theo port; tên riêng tránh đụng cookie Rita ID. Không mở demo ra mạng.
 
-## Luồng
+## Hợp đồng với Rita ID hiện tại
 
-1. `GET /auth/login` sinh state và PKCE S256; lưu yêu cầu trong session tối đa 10 phút. Login mới thay yêu cầu cũ; chỉ hỗ trợ một attempt đang chờ trên mỗi session trình duyệt. Identity đang đăng nhập được giữ đến khi callback thành công hoặc hết hạn.
-2. Redirect portal với client ID, callback, state, scope và challenge.
-3. Portal xử lý login/consent và redirect về `GET /auth/callback`.
-4. Callback kiểm tra state kể cả khi bị từ chối; claim attempt một lần trước khi đổi code. Map claim trong bộ nhớ chặn hai callback đồng thời cùng đổi code.
-5. Server POST JSON đổi code; xác minh access JWT RS256 qua JWKS, audience/client ID, expiry và UUID subject.
-6. Gọi userinfo; subject phải trùng JWT. Chỉ lấy các field profile được hỗ trợ.
-7. Regenerate session ID, lưu profile và CSRF token; redirect về trang chủ để URL không còn code.
+- Authorization Code + PKCE S256; scope yêu cầu openid profile email. Confidential client
+  vẫn bắt buộc secret dù có PKCE. Không dùng offline_access hoặc giả định forced consent.
+- Portal giữ state/PKCE qua login/consent. Backend authorize/consent trả JSON
+  { redirectUri, code, state }; portal thực hiện browser redirect về callback của demo.
+- Token request dùng JSON tại POST /auth/oauth/token. Refresh dùng grant_type=refresh_token,
+  refresh_token và client credentials. Không dùng /auth/refresh hoặc Rita ID cookies.
+- Revoke dùng POST /auth/oauth/revoke với token là refresh token và client credentials;
+  thành công có thể không có response body.
+- Backend rotate refresh token, phát hiện reuse và revoke cả OAuth session. Refresh không
+  gia hạn thời hạn tuyệt đối của OAuth session. Backend đồng bộ profile HRM khi refresh;
+  nhân viên mất/inactive hoặc token/session không hợp lệ có thể trả invalid_grant.
+- 503 temporarily_unavailable của backend biểu thị HRM lỗi tạm thời và transaction chưa
+  tiêu thụ refresh token. Lỗi network hoặc 500 không mang bảo đảm đó.
+- Userinfo có _id, name, email, employee_id, phone_number, is_developer, groups.
+  Demo map _id sang sub. employee_id là mã nhân viên; employee_id/phone_number có thể null.
+  Group là EMPLOYEE/CUSTOMER/ENTERPRISE; developer là flag riêng, không phải group thứ tư.
+  Các group được parse không có nghĩa hệ thống hỗ trợ onboarding mọi group.
+- Backend chưa lọc field userinfo theo scopes hoặc enforce audience/scope đầy đủ ở resource API.
+  Demo tự xác minh audience client ID, chữ ký RS256, expiry và UUID subject qua JWKS đã cấu hình.
+  Subject userinfo phải trùng JWT; refresh không được đổi người dùng.
+- ID token bị bỏ qua. Đây là adapter theo hợp đồng Rita ID, không phải client OIDC chuẩn;
+  không giả định issuer, discovery hoặc token purpose chưa được provider hỗ trợ.
+- MOCKUP_MODE hiện không điều khiển login/profile. Không cần cấu hình flag này trong demo.
 
-Không dùng ID token để xác thực. Không lưu access/refresh/ID token sau callback và không trả chúng ra trình duyệt. Chưa kiểm tra issuer vì Rita ID hiện không cấp issuer đầy đủ; JWKS origin được cố định bằng cấu hình server. Đây là adapter cho hợp đồng hiện tại, không phải chứng nhận OIDC chuẩn.
+## Vòng đời và concurrency
 
-Provider hiện bỏ qua kiểm tra client secret nếu code có PKCE. App vẫn gửi secret server-to-server; điều này không sửa hạn chế provider. Provider có trả refresh token và tạo session tương ứng nhưng app mẫu không sử dụng token đó; logout app mẫu không thu hồi session phía provider.
+Login tạo state và verifier ngẫu nhiên; pending attempt tối đa 10 phút, một attempt mỗi browser
+session. Callback claim attempt một lần trước await; callback đồng thời không đổi code hai lần.
+Deny hoặc callback lỗi không tự xóa identity cũ còn hiệu lực. Login thành công thay session ID
+và cố gắng revoke OAuth session cũ.
 
-## API và phiên
+Kho OAuthSessions riêng giữ access/refresh token và profile trong RAM. Express session chỉ
+giữ tham chiếu theo session ID, CSRF, deadline và pending login. Identity/req.auth chỉ chứa
+profile và expiresAt của access JWT; không serialize Authorization/TokenSet ra client.
+Mọi response no-store; HTML escape các field; Helmet đặt security headers.
+Không log token, secret, callback query hay profile.
+
+Có ba mốc thời hạn khác nhau:
+
+| Mốc | Ý nghĩa |
+| --- | --- |
+| accessExpiresAt | Expiry từ JWT đã xác minh, không suy từ expires_in |
+| sessionExpiresAt | Hạn tuyệt đối local, mặc định 8 giờ từ callback; refresh không kéo dài |
+| OAuth session phía Rita ID | Do backend quyết định; response không cung cấp hạn refresh để demo hiển thị |
+
+Cookie và server cùng giới hạn phiên local. Nếu không có refresh token, phiên kết thúc không
+muộn hơn hạn access token. Khi local hết hạn, timer cleanup thử revoke và xóa credentials
+ngay cả khi browser không quay lại; timer này không refresh nền. Restart mất mọi dữ liệu RAM;
+các phiên provider chưa revoke có thể tồn tại đến khi hết hạn.
+
+Request tới / hoặc /api/me tự refresh khi access token còn dưới 30 giây, kể cả đã hết hạn.
+Nút Refresh ngay chủ động rotate trước hạn. Các request đồng thời dùng chung một promise;
+request sau dùng replacement token trong kho, không đọc bản cũ từ Express session.
+
+Sau response refresh hợp lệ, kho ghi token mới trước khi verify JWT/lấy userinfo.
+Nếu bước userinfo lỗi tạm thời, không dùng profile cũ để phục vụ protected request;
+sau cooldown thử verify/userinfo bằng access token mới, không rotate thêm.
+refreshCount/lastRefreshAt chỉ cập nhật khi toàn bộ bước xác minh hoàn tất.
+Trong lúc verificationPending, accessExpiresAt vẫn là hạn của JWT đã xác minh gần nhất.
+
+## Lỗi và logout
+
+| Tình huống | Hành vi |
+| --- | --- |
+| State thiếu/sai/hết hạn, deny hoặc thiếu code | 400; không đổi code hoặc không tạo phiên |
+| invalid_grant, token hết hạn/subject sai | 401 ở API; phiên không còn dùng được, login lại |
+| invalid_client hoặc lỗi cấu hình grant/scope | integration_error, 502; không redirect lặp |
+| Backend trả đúng 503 temporarily_unavailable | Giữ token, cooldown 5 giây; Retry-After và thử lại có kiểm soát |
+| Timeout/network/response hỏng/500 khi refresh | Không retry token cũ; kết thúc phiên, thử revoke bằng token đang giữ |
+| Userinfo/JWKS lỗi tạm thời sau rotation | 503, cooldown 5 giây; giữ replacement để xác minh lại |
+| Manual refresh khi không có refresh token | 409 refresh_unavailable |
+| CSRF thiếu/sai | 403 invalid_csrf |
+| Revoke thất bại | Vẫn xóa phiên local; trang login báo chưa xác nhận được revoke |
+
+Không tự retry token endpoint. Với manual refresh lỗi 503 trước rotation, access token cũ còn
+đủ hạn vẫn có thể dùng ở request thông thường; yêu cầu refresh tiếp theo phải chờ cooldown.
+Nếu access token thay thế hết hạn trong lúc chờ xác minh, kết thúc phiên và yêu cầu login lại.
+
+Logout đánh dấu phiên đang đóng trước await, chặn refresh mới, đợi refresh đang chạy rồi revoke
+token mới nhất. Callback đang chạy bị hủy và cố gắng revoke token vừa cấp; callback/refresh muộn
+không khôi phục identity. Không lưu hàng đợi retry revoke. Revoke lỗi vẫn dọn credentials.
+
+Logout demo **không logout SSO Rita ID**. Backend revoke OAuth session ngăn refresh tiếp theo,
+nhưng không lập tức vô hiệu access JWT đã phát hành. Login lại có thể không cần mật khẩu nếu
+phiên SSO còn hiệu lực. Không có nút logout toàn hệ thống.
+
+## Routes và cách tái sử dụng
 
 | Method | Path | Kết quả |
 | --- | --- | --- |
-| GET | / | HTML login hoặc profile/logout |
-| GET | /auth/login | Redirect đến portal |
-| GET | /auth/callback | Xử lý code/error và state |
-| GET | /api/me | Profile JSON; 401 nếu chưa login/hết hạn |
-| POST | /auth/logout | Bắt buộc CSRF token form; xóa session local, redirect 303 |
-| GET | /health | `{"status":"ok"}`; không gọi dịch vụ ngoài |
+| GET | / | Login hoặc profile + trạng thái phiên; tự refresh khi cần |
+| GET | /auth/login | Redirect portal với state/PKCE |
+| GET | /auth/callback | Xử lý code/error, tạo phiên rồi redirect / |
+| GET | /api/me | Profile JSON; tự refresh; 401/502/503 khi không phục vụ được |
+| GET | /api/session | Metadata an toàn, không kích hoạt refresh |
+| POST | /auth/refresh | CSRF form, refresh thủ công, redirect 303 về / khi thành công |
+| POST | /auth/logout | CSRF form, revoke + xóa phiên, redirect 303 |
+| GET | /health | {"status":"ok"}; không gọi upstream |
 
-Profile contains seven required fields: `sub`, `name`, `email`, `employee_id`, `phone_number`, `is_developer`, and `groups`. The adapter requires backend userinfo `_id` to match JWT `sub`, then maps `_id -> sub` for the local profile and `/api/me`. Employee code and phone number may be null. Groups are EMPLOYEE, CUSTOMER or ENTERPRISE; developer status is displayed, not used to restrict demo login.
+/api/session trả đúng accessExpiresAt, sessionExpiresAt, canRefresh, scopes, refreshCount,
+lastRefreshAt, verificationPending. Timestamp là epoch milliseconds, lastRefreshAt ban đầu null.
+Không chứa token, session ID, CSRF hay secret. /api/me giữ nguyên contract profile với sub.
 
-Cookie `rita_example.sid`: HTTP-only, SameSite=Lax, Path=/, không Domain, Secure khi HTTPS. Cookie localhost không được cách ly theo port nên tên này khác cookie Rita ID. Không trộn hostname `localhost` và `127.0.0.1` trong cùng luồng login.
+createApp(config, { callbackResponse: "json" }) vẫn hỗ trợ callback JSON { profile, expiresAt }.
+expiresAt là hạn access JWT; xem /api/session cho hạn local. JSON mode vẫn cần browser session
+đã bắt đầu bằng /auth/login, không phải API nhận code tùy ý. Callback error trả mã đã lọc:
+invalid_state/access_denied/missing_code (400), authentication_failed/integration_error (502),
+internal_error (500). Các API route trả { error }; lỗi của form routes trả HTML an toàn.
 
-Phiên local tồn tại tối đa 5 phút, không vượt expiry JWT, được kiểm tra phía server. Hết hạn thì login lại; phiên SSO Rita ID còn hiệu lực có thể giúp bỏ qua nhập mật khẩu. MemoryStore mất dữ liệu khi restart, chỉ dùng một tiến trình. Không có refresh, logout toàn hệ thống hay quản lý client/consent.
+RitaAuthStrategy và RitaAuthGuard là Express classes, không phải Passport/NestJS providers.
+Khi tái sử dụng, tạo một OAuthClient, một OAuthSessions và một pendingClaims registry cho mỗi
+app; truyền cùng instances vào strategy/router/guard. Middleware session phải đứng trước guard.
+Guard được tạo bằng new RitaAuthGuard({ sessions }); chế độ unauthenticated: "redirect" chỉ
+redirect lỗi 401 tới /auth/login, không redirect lỗi cấu hình hoặc upstream tạm thời.
+Không đặt guard trước callback. Guard không nhận Bearer từ browser, không kiểm tra quyền theo
+group và không thay thế CSRF cho thao tác ghi. Không dùng nhiều worker/instance với kho RAM này.
 
-Các response đặt no-store; Helmet đặt security headers. Không ghi log URL callback/token/secret. Lỗi upstream không được trả nguyên văn cho trình duyệt. Token/userinfo và JWKS có timeout 10 giây, không tự retry đổi code.
+| Source | Trách nhiệm |
+| --- | --- |
+| [oauth-client.ts](src/auth/oauth-client.ts) | Exchange/refresh/revoke, JWT/JWKS, userinfo và lỗi upstream đã lọc |
+| [oauth-sessions.ts](src/auth/oauth-sessions.ts) | Nguồn credentials duy nhất, deadline, single flight, rotation/revoke |
+| [rita-auth.strategy.ts](src/auth/rita-auth.strategy.ts) | Login/callback, state và session regeneration |
+| [rita-auth.guard.ts](src/auth/rita-auth.guard.ts) | Protected route và tự refresh |
+| [routes.ts](src/auth/routes.ts) | Callback response, refresh/logout CSRF |
+| [session.ts](src/auth/session.ts) | Express session types và cookie |
+| [pending-claims.ts](src/auth/pending-claims.ts) | Claim/cancel login attempt đồng thời |
+| [app.ts](src/app.ts) | Wiring, headers và error handling |
+| [public.ts](src/routes/public.ts), [page.ts](src/views/page.ts) | Profile, status và form demo |
+| [config.ts](src/config.ts), [server.ts](src/server.ts) | Cấu hình và entrypoint loopback |
 
 ## Kiểm chứng
 
@@ -93,135 +207,49 @@ npm run build
 npm start
 ```
 
-Tests dùng Node test runner + tsx, Supertest, JWT RSA thật với JWKS giả lập và HTTP giả lập. Bao phủ redirect/state/PKCE, callback lặp và đồng thời, token sai chữ ký/audience/expiry, userinfo không khớp, timeout/lỗi upstream, HTML escaping, CSRF, session rotation/hết hạn/restart và cấu hình.
+Chỉ npm start/dev tải cấu hình runtime và chạy app. Tests dùng fixtures riêng, RSA thật/JWKS
+giả lập, Supertest và HTTP provider local; không đọc .env hoặc gọi backend/HRM thật.
 
-Smoke test thực tế:
-1. Cấu hình client như trên; chạy cả backend, portal và app mẫu.
-2. Dùng cửa sổ trình duyệt mới: Login → nhập tài khoản Odoo → Allow → thấy đúng profile.
-3. Mở /api/me: kiểm tra `sub`, không có token.
-4. Logout app mẫu: /api/me trả 401. Login lại kiểm tra tái sử dụng SSO.
-5. Thử Deny bằng client chưa được consent: không tạo phiên local.
-6. Chờ hết phiên hoặc restart app: yêu cầu login lại.
-7. Để kiểm tra nhiều tài khoản đúng danh tính, Rita ID cần `MOCKUP_MODE=false`. Khi true, backend lấy nhân viên cố định ID 4 sau login Odoo thật.
+### Checklist end-to-end thủ công
 
-Lỗi thường gặp:
-- Invalid redirect URI: kiểm tra scheme, hostname, port, path và slash cuối trùng đăng ký.
-- State không hợp lệ: cookie bị mất, callback dùng lại, quá 10 phút hoặc đã bấm login mới.
-- Login thất bại: kiểm tra backend/Odoo, client config, JWKS và đồng hồ máy; không dán token vào log.
-- Cookie HTTPS không được đặt: cần TLS proxy loopback đúng cấu hình; local mặc định dùng HTTP.
-- Port đã dùng: thay PORT, APP_BASE_URL và callback đăng ký đồng bộ.
+Dùng client/tài khoản dành cho kiểm thử và môi trường đã có schema tương thích:
 
-Kết quả test giả lập không chứng minh kết nối PostgreSQL/Odoo hoặc toàn bộ SSO thật. Chỉ ghi nhận smoke test thực tế sau khi có tài khoản/client phù hợp; không tự sửa backend để làm demo chạy.
+1. Browser mới: login → đăng nhập Rita ID → allow → kiểm tra profile đúng người.
+2. Client chưa consent: deny → không tạo phiên demo mới.
+3. /api/me có sub và bảy field profile; /api/session chỉ có metadata, không credentials.
+4. Bấm Refresh ngay: refreshCount tăng, profile được đồng bộ, sessionExpiresAt không đổi.
+5. Chờ gần/hết hạn access rồi tải / hoặc /api/me: tự refresh, không yêu cầu password.
+6. Mở hai tab cùng phiên và gửi request gần hạn: một rotation, không vô tình revoke do replay.
+7. Logout: /api/me thành 401; login lại có thể tái sử dụng SSO.
+8. Trong môi trường kiểm thử có kiểm soát, kiểm tra HRM tạm lỗi, nhân viên inactive hoặc
+   OAuth session bị revoke: hiển thị lỗi/phải login lại theo bảng trên.
+9. Dùng SESSION_MAX_AGE_HOURS ngắn để kiểm tra local expiry; restart kiểm tra phiên RAM mất.
+10. Khi cần đánh giá proxy/TLS, thực hiện lại với cấu hình tương ứng và kiểm tra Secure cookie.
 
-## Cấu trúc
+Không lấy refresh token thật ra browser/log hoặc cố phát lại trên hệ thống dùng chung.
+Replay, mất response, outage và concurrency được mô phỏng trong test suite; không dùng
+smoke test để thay đổi tài khoản/schema hệ thống thật.
 
-### RitaAuthStrategy cho login và callback API
+### Current verification status
 
-`RitaAuthStrategy` là strategy dành cho Express của project, không phải Passport
-Strategy hay NestJS provider. Strategy thực hiện state/PKCE, đổi code, xác minh
-JWT/userinfo qua OAuth client, tạo lại session và gán `req.auth`. `RitaAuthGuard`
-kiểm tra session đó ở các request tiếp theo. Không đặt guard trước callback vì
-người dùng chưa có phiên đăng nhập ở bước này.
+Kiểm chứng ngày **2026-10-17**, commit **be0b65d** cộng working tree của thay đổi lifecycle:
+npm run typecheck pass; npm test **61/61 pass**; npm run build pass; git diff --check pass;
+12 local Markdown links trong README trỏ tới file tồn tại. Không thêm dependency.
+Test runner/build chạy với quyền ngoài sandbox vì môi trường Windows giới hạn worker spawning
+và thư mục project nằm ngoài writable roots mặc định.
 
-`src/auth/routes.ts` đã dùng trực tiếp `strategy.login` và `strategy.callback`.
-Mặc định callback vẫn redirect về `/`. Để dùng callback trả JSON trong app này:
+Tests giữ coverage login/state/PKCE/JWT/profile/CSRF, bổ sung rotation tự động/thủ công,
+single flight, HRM 503/cooldown, mất response sau commit, userinfo outage sau rotation,
+đổi subject, logout/callback races, revoke lỗi, expiry cleanup, restart và không lộ credentials.
+Lần kiểm tra đầu có một assertion cũ mong đợi chỉ hai upstream calls; đã cập nhật thành ba
+vì logout nay gọi revoke. Không có failure còn lại trong các checks trên.
 
-```ts
-const app = createApp(config, { callbackResponse: "json" });
-```
+Chưa chạy browser login, live backend/HRM, TLS proxy, deployment hoặc migration.
+Kết quả giả lập không chứng minh concurrency PostgreSQL hoặc end-to-end với hệ thống thật.
+Backend, portal và .env runtime không được sửa trong thay đổi này.
 
-Callback thành công trả `200 { profile, expiresAt }` và cookie session. Callback
-lỗi trả JSON với `error`: `invalid_state`, `access_denied`, `missing_code` (400),
-`authentication_failed` (502), hoặc `internal_error` (500). Không trả token hay
-lỗi upstream. Chế độ JSON vẫn dùng browser session: phải bắt đầu tại `/auth/login`
-và gửi lại cùng cookie khi callback; đây không phải API nhận code tùy ý từ client.
+### Historical baseline (superseded)
 
-Để gắn vào router Express khác:
-
-```ts
-import { RitaAuthStrategy, RitaAuthError } from "./auth/rita-auth.strategy.js";
-import { createSessionMiddleware } from "./auth/session.js";
-import type { ErrorRequestHandler } from "express";
-
-app.use(createSessionMiddleware(config));
-const strategy = new RitaAuthStrategy({ config });
-app.get("/auth/login", strategy.login);
-app.get("/auth/callback", strategy.callback, (req, res) => {
-  res.json(req.auth); // Hoặc res.redirect("/") cho trang web.
-});
-const authError: ErrorRequestHandler = (error, _req, res, _next) => {
-  res.status(error instanceof RitaAuthError ? error.status : 500).json({
-    error: error instanceof RitaAuthError ? error.code : "internal_error",
-  });
-app.use("/auth/callback", authError);
-```
-
-Dùng cùng một instance strategy cho login và callback trong mỗi app. Callback URL
-trong config phải khớp route và URI đã đăng ký tại Rita ID. Session/claims vẫn nằm
-trong bộ nhớ, chỉ hỗ trợ demo một tiến trình. Cấu hình `oauth`, `now`, `pendingClaims`
-có thể được truyền vào constructor để kiểm thử hoặc dùng các dependency có sẵn.
-
-### Bảo vệ route bằng RitaAuthGuard (Express)
-
-`RitaAuthGuard` kiểm tra phiên server được tạo sau callback Rita ID. Cài middleware
-session trước guard; guard tự kiểm tra thời hạn nên không phụ thuộc `expireIdentity`.
-Guard không xác thực bearer token do client gửi và không thay thế các route OAuth.
-
-```ts
-import { RitaAuthGuard } from "./auth/rita-auth.guard.js";
-
-const apiAuth = new RitaAuthGuard();
-router.get("/api/private", apiAuth.handle, (req, res) => {
-  res.json(req.auth!.profile);
-});
-
-const pageAuth = new RitaAuthGuard({ unauthenticated: "redirect" });
-router.get("/dashboard", pageAuth.handle, dashboardHandler);
-```
-
-Mặc định, chưa đăng nhập hoặc hết hạn trả `401 { error: "not_authenticated" }`.
-Chế độ `redirect` trả 303 đến `/auth/login`; callback hiện quay về `/`, không lưu
-URL quay lại. `req.auth` chứa `profile` và `expiresAt`, không chứa CSRF hoặc OAuth
-token. Chỉ dùng `req.auth!` trong handler đứng sau guard. `/api/me` đã dùng guard;
-`/`, `/health` và các route OAuth vẫn truy cập công khai. Guard chỉ xác thực đăng
-nhập, không kiểm tra quyền theo nhóm và không thay thế CSRF cho thao tác ghi.
-
-### Các file
-
-- `src/config.ts`: validation cấu hình.
-- `src/auth/rita-auth.guard.ts`: guard Express dùng lại cho các route cần đăng nhập.
-- `src/auth/rita-auth.strategy.ts`: strategy dùng chung cho login và xác thực callback.
-- `src/app.ts`: ghép dependencies, middleware, routers và xử lý lỗi HTTP.
-- `src/auth/routes.ts`: gắn strategy vào login/callback, chọn HTML/JSON response và xử lý logout.
-- `src/auth/session.ts`: session types, cookie, middleware hết hạn và helpers lưu/tạo lại phiên.
-- `src/auth/pending-claims.ts`: kho claims riêng cho mỗi app, ngăn callback dùng lại hoặc đồng thời.
-- `src/auth/oauth-client.ts`: đổi code, xác minh JWKS/JWT và lấy userinfo.
-- `src/auth/profile.ts`: profile type, kiểm tra subject và validate/map userinfo.
-- `src/auth/security.ts`: sinh chuỗi ngẫu nhiên, PKCE và so sánh timing-safe.
-- `src/routes/public.ts`: trang chủ, health và API profile.
-- `src/views/page.ts`: render các trạng thái HTML và escaping.
-- `src/server.ts`: tải env và listen.
-- `test/`: test cô lập.
-
-
-
-## Current compatibility and verification (2026-10-14)
-
-Proxy configuration update (2026-10-16): API base URLs now support path prefixes; defaults use portal `http://localhost:3000` and API `http://localhost:3000/api`. Typecheck and build passed; all 36 tests passed, including an HTTP provider fixture that serves token, userinfo and remote RSA JWKS under `/api`. Tests required expanded permissions after the sandbox blocked worker spawning with EPERM. Live portal/backend login has not been verified for this update.
-
-The current backend implementation is the API contract for this adapter:
-
-- Authorization Code with PKCE S256 and scopes `openid profile email`; no `offline_access` or forced consent parameter.
-- Access JWT verification requires RS256, the configured client audience, UUID subject and expiry. JWKS comes only from the configured API origin. The backend does not issue `iss` or `token_use`; the adapter does not validate issuer or token purpose. This is not a claim of OIDC conformance.
-- `RITA_ISSUER` is no longer read. An existing entry in local `.env` is ignored; no secret files were changed.
-- Userinfo must provide all seven backend fields with valid types and a matching `_id`. Unknown fields are discarded; only employee code and phone number permit null.
-- Access tokens are used only during exchange/userinfo. ID and refresh tokens are discarded. No credentials are stored in the local session or sent to the browser.
-- Session expiry is the earlier of JWT expiry and five minutes after callback. The JWT expiry is authoritative even when the backend's literal `expires_in: 300` differs.
-- Logout destroys only the demo session. There are no refresh, revoke or Rita ID logout requests. The refresh session created by the provider during code exchange remains until its expiry unless revoked separately.
-- Node 24, MemoryStore, localhost ports and existing dependencies are unchanged. No database migration is needed. Restart the demo after updating; MemoryStore sessions are lost on restart.
-
-Baseline before this change: typecheck and build passed; 20 of 22 tests passed. Existing failures covered the five-minute session cap and retention of the access token in the exchange result.
-
-Final verification on 2026-10-14 for the updated local files (this directory has no Git repository): `npm run typecheck` passed; `npm test` passed all 27 tests; `npm run build` passed. The initial sandbox blocked test-worker spawning and build writes with EPERM; both commands were rerun successfully with expanded permissions.
-
-Verification uses isolated HTTP requests, RSA signing and mocked provider responses. No live login, browser/Odoo/PostgreSQL smoke test or migration has been run. Follow the manual smoke procedure above with an appropriate account and registered client; use `MOCKUP_MODE=false` when verifying distinct real identities.
+Ngày 2026-10-16: typecheck/build và 36 tests của phiên bản chỉ login đã pass theo ghi nhận
+trước đây. Các mô tả cũ “không refresh”, phiên local tối đa 5 phút, bỏ secret khi có PKCE và
+MOCKUP_MODE chọn nhân viên cố định không còn áp dụng. Đây không phải kết quả của bản hiện tại.

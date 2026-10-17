@@ -1,4 +1,4 @@
-﻿import { test } from "node:test";
+import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import request from "supertest";
@@ -9,6 +9,11 @@ const config = readConfig({
   RITA_CLIENT_ID: "demo-client", RITA_CLIENT_SECRET: "demo-secret",
   SESSION_SECRET: "a".repeat(40),
 });
+const unusedOAuth = {
+  async refresh(): Promise<never> { throw new Error("Unexpected refresh"); },
+  async verify(): Promise<never> { throw new Error("Unexpected verify"); },
+  async revoke() {},
+};
 const sub = "12345678-1234-4123-8123-123456789012";
 const profile = { sub, name: "Demo", email: "demo@example.com", employee_id: null, phone_number: null, is_developer: false, groups: "EMPLOYEE" as const };
 
@@ -16,16 +21,16 @@ test("strategy JSON callback establishes a session usable by RitaAuthGuard", asy
   const time = Date.now();
   let exchanges = 0;
   const app = createApp(config, { callbackResponse: "json", now: () => time,
-    oauth: { async exchange() {
+    oauth: { ...unusedOAuth, async exchange() {
       exchanges++;
-      return { profile, expiresAt: time + 600_000 };
+      return { tokens: { accessToken: "fixture-access", scopes: [] }, profile, expiresAt: time + 600_000 };
     } },
   });
   const agent = request.agent(app);
   const { response: login, url } = await begin(agent);
   const state = url.searchParams.get("state");
   const callback = await agent.get("/auth/callback").query({ state, code: "once" })
-    .expect(200, { profile, expiresAt: time + 300_000 });
+    .expect(200, { profile, expiresAt: time + 600_000 });
   assert.match(callback.headers["content-type"]!, /application\/json/);
   assert.equal(callback.headers["cache-control"], "no-store");
   assert.notEqual(String(callback.headers["set-cookie"]).split(";")[0],
@@ -38,7 +43,7 @@ test("strategy JSON callback establishes a session usable by RitaAuthGuard", asy
 
 test("strategy JSON callback reports safe failures and never authenticates them", async () => {
   let exchanges = 0;
-  const app = createApp(config, { callbackResponse: "json", oauth: { async exchange() {
+  const app = createApp(config, { callbackResponse: "json", oauth: { ...unusedOAuth, async exchange() {
     exchanges++;
     throw new Error("private-token-secret");
   } } });
@@ -71,9 +76,9 @@ test("starting another login and denying consent preserves the active identity",
 function setup() {
   let time = Date.now();
   const calls: { code: string; verifier: string }[] = [];
-  const app = createApp(config, { now: () => time, oauth: { async exchange(code, verifier) {
+  const app = createApp(config, { now: () => time, oauth: { ...unusedOAuth, async exchange(code, verifier) {
     calls.push({ code, verifier });
-    return { profile: { ...profile, name: '<script>alert("x")</script>', email: "demo@example.com" }, expiresAt: time + 120_000 };
+    return { tokens: { accessToken: "fixture-access", scopes: [] }, profile: { ...profile, name: '<script>alert("x")</script>', email: "demo@example.com" }, expiresAt: time + 120_000 };
   } } });
   return { app, agent: request.agent(app), calls, advance: (ms: number) => { time += ms; } };
 }
@@ -187,10 +192,10 @@ test("session expires at token expiry, restart loses session, logout requires CS
   await request(app).get("/health").expect(200, { status: "ok" });
 });
 
-test("local session is capped at five minutes even with a longer provider token", async () => {
+test("local absolute lifetime is enforced even with a longer provider token", async () => {
   let time = Date.now();
-  const app = createApp(config, { now: () => time, oauth: { async exchange() {
-    return { profile: { ...profile }, expiresAt: time + 3_600_000 };
+  const app = createApp({ ...config, sessionMaxAgeMs: 300_000 }, { now: () => time, oauth: { ...unusedOAuth, async exchange() {
+    return { tokens: { accessToken: "fixture-access", scopes: [] }, profile: { ...profile }, expiresAt: time + 3_600_000 };
   } } });
   const agent = request.agent(app);
   const state = (await begin(agent)).url.searchParams.get("state");
@@ -200,7 +205,7 @@ test("local session is capped at five minutes even with a longer provider token"
 });
 
 test("upstream errors are generic, consumed, and never create a session", async () => {
-  const app = createApp(config, { oauth: { async exchange() { throw new Error("sensitive-token-and-secret"); } } });
+  const app = createApp(config, { oauth: { ...unusedOAuth, async exchange() { throw new Error("sensitive-token-and-secret"); } } });
   const agent = request.agent(app);
   const state = (await begin(agent)).url.searchParams.get("state");
   const error = await agent.get("/auth/callback").query({ state, code: "x" }).expect(502);
@@ -221,7 +226,7 @@ test("HTTPS hosting emits a Secure cookie", async () => {
 test("configuration rejects production, invalid origins, empty secrets and placeholders", () => {
   const env = { RITA_CLIENT_ID: "client", RITA_CLIENT_SECRET: "secret", SESSION_SECRET: "b".repeat(32) };
   for (const extra of [
-    { NODE_ENV: "production" }, { PORT: "0" }, { PORT: "NaN" },
+    { NODE_ENV: "production" }, { SESSION_MAX_AGE_HOURS: "0" }, { SESSION_MAX_AGE_HOURS: "NaN" }, { SESSION_MAX_AGE_HOURS: "25" }, { PORT: "0" }, { PORT: "NaN" },
     { APP_BASE_URL: "ftp://example.com" }, { APP_BASE_URL: "https://a/b" },
     { RITA_PORTAL_URL: "https://a/b" },
     { RITA_PORTAL_URL: "https://user:pass@example.com" }, { SESSION_SECRET: "short" },

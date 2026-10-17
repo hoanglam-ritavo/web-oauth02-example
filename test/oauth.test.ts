@@ -39,7 +39,7 @@ test("exchanges exact JSON contract then verifies RSA/JWKS and matches userinfo 
   const { fetcher, calls } = mockFetch(accessToken, { ...userinfo, arbitrary: "not persisted" });
   const client = createOAuthClient(config, { fetch: fetcher, key, now: () => now * 1000 });
   const result = await client.exchange("code", "verifier");
-  assert.deepEqual(result, { profile: { sub: subject, name: userinfo.name, email: userinfo.email, employee_id: null, phone_number: null, is_developer: false, groups: "EMPLOYEE" }, expiresAt: (now + 300) * 1000 });
+  assert.deepEqual(result, { tokens: { accessToken, refreshToken: "discard-refresh", scopes: [] }, profile: { sub: subject, name: userinfo.name, email: userinfo.email, employee_id: null, phone_number: null, is_developer: false, groups: "EMPLOYEE" }, expiresAt: (now + 300) * 1000 });
   assert.equal(calls.length, 2);
   assert.equal(calls[0]!.url, config.apiUrl + "/auth/oauth/token");
   assert.deepEqual(JSON.parse(String(calls[0]!.init.body)), {
@@ -51,7 +51,7 @@ test("exchanges exact JSON contract then verifies RSA/JWKS and matches userinfo 
   assert.equal(calls[0]!.init.redirect, "error");
   assert.equal(calls[1]!.init.redirect, "error");
   assert.ok(calls[0]!.init.signal);
-  assert.doesNotMatch(JSON.stringify(result), /discard|access_token|arbitrary/);
+  assert.doesNotMatch(JSON.stringify(result.profile), /discard|access_token|arbitrary/);
 });
 
 test("exchanges through an API prefix including real remote JWKS verification", async (t) => {
@@ -111,7 +111,7 @@ for (const [label, options] of Object.entries({
   test("rejects " + label + " before userinfo", async () => {
     const { fetcher, calls } = mockFetch(await token(options));
     await assert.rejects(createOAuthClient(config, { fetch: fetcher, key }).exchange("code", "verifier"));
-    assert.equal(calls.length, 1);
+    assert.equal(calls.length, 2); // Failed identity also revokes the issued refresh token.
   });
 }
 test("rejects mismatched userinfo subject and malformed profile", async () => {
@@ -183,7 +183,7 @@ test("rejects a token that expires while fetching userinfo", async () => {
   await assert.rejects(createOAuthClient(config, { fetch, key, now: () => time }).exchange("code", "verifier"));
 });
 
-test("real adapter stores no credentials, never refreshes and logs out locally", async (t) => {
+test("real adapter keeps credentials outside Express session and revokes on logout", async (t) => {
   let time = now * 1000;
   const accessToken = await token();
   const { fetcher, calls } = mockFetch(accessToken);
@@ -206,14 +206,14 @@ test("real adapter stores no credentials, never refreshes and logs out locally",
   assert.ok(home.text.includes("<dd>EMPLOYEE</dd>"));
   const me = await agent.get("/api/me").expect(200);
   assert.equal(me.body.sub, subject);
-  time += 280_000;
+  time += 200_000;
   await agent.get("/api/me").expect(200);
   assert.equal(calls.length, 2);
   const csrf = /name="csrf" value="([^"]+)"/.exec(home.text)![1]!;
   await agent.post("/auth/logout").type("form").send({ csrf }).expect(303);
   await agent.get("/api/me").expect(401, { error: "not_authenticated" });
-  assert.equal(calls.length, 2);
-  assert.ok(saved.some(value => value.includes('"identity"')));
+  assert.equal(calls.length, 3);
+  assert.ok(saved.some(value => value.includes('"oauthId"')));
   for (const value of [...saved, home.text, JSON.stringify(me.body)]) {
     assert.ok(!value.includes(accessToken));
     assert.doesNotMatch(value, /discard-id|discard-refresh|accessToken|refreshToken|id_token|client_secret/);

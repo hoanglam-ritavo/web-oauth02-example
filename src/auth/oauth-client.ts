@@ -1,94 +1,114 @@
 import { createRemoteJWKSet, jwtVerify, type JWTVerifyGetKey } from "jose";
 import type { Config } from "../config.js";
-
 import { parseProfile, validSubject, type Profile } from "./profile.js";
 
-export interface Identity {
-  profile: Profile;
-  expiresAt: number;
-}
+// Safe to expose to route handlers. Credentials never belong in this type.
+export interface Identity { profile: Profile; expiresAt: number }
+export interface TokenSet { accessToken: string; refreshToken?: string; scopes: string[] }
+export interface Authorization extends Identity { tokens: TokenSet }
 export interface OAuthClient {
-  exchange(code: string, verifier: string): Promise<Identity>;
+  exchange(code: string, verifier: string): Promise<Authorization>;
+  refresh(refreshToken: string): Promise<TokenSet>;
+  verify(tokens: TokenSet, expectedSubject?: string): Promise<Identity>;
+  revoke(refreshToken: string): Promise<void>;
 }
-const record = (value: unknown): value is Record<string, unknown> =>
-  typeof value === "object" && value !== null && !Array.isArray(value);
+export class ProviderError extends Error {
+  constructor(readonly code: string, readonly status: number) {
+    super("Rita ID request failed.");
+  }
+}
+export class InvalidIdentityError extends Error {
+  constructor() { super("Invalid Rita ID identity."); }
+}
+const record = (v: unknown): v is Record<string, unknown> =>
+  typeof v === "object" && v !== null && !Array.isArray(v);
 
-export function createOAuthClient(
-  config: Config,
-  options: {
-    fetch?: typeof fetch;
-    key?: JWTVerifyGetKey;
-    now?: () => number;
-    timeoutMs?: number;
-  } = {},
-): OAuthClient {
+export function createOAuthClient(config: Config, options: {
+  fetch?: typeof fetch; key?: JWTVerifyGetKey; now?: () => number; timeoutMs?: number;
+} = {}): OAuthClient {
   const request = options.fetch ?? fetch;
   const now = options.now ?? Date.now;
   const timeoutMs = options.timeoutMs ?? 10_000;
-  const key =
-    options.key ??
-    createRemoteJWKSet(new URL(config.apiUrl + "/.well-known/jwks.json"), {
-      timeoutDuration: timeoutMs,
-    });
-  async function json(path: string, init: RequestInit): Promise<unknown> {
+  const key = options.key ?? createRemoteJWKSet(
+    new URL(config.apiUrl + "/.well-known/jwks.json"), { timeoutDuration: timeoutMs },
+  );
+  async function send(path: string, init: RequestInit): Promise<Response> {
     const response = await request(config.apiUrl + path, {
-      ...init,
-      signal: AbortSignal.timeout(timeoutMs),
-      redirect: "error",
+      ...init, signal: AbortSignal.timeout(timeoutMs), redirect: "error",
     });
-    if (!response.ok) throw new Error("Rita ID request failed.");
-    return response.json();
+    if (!response.ok) {
+      const data: unknown = await response.json().catch(() => null);
+      const allowed = ["temporarily_unavailable", "invalid_grant", "invalid_client",
+        "invalid_scope", "unauthorized_client", "unsupported_grant_type", "invalid_request"];
+      const code = record(data) && typeof data.error === "string" && allowed.includes(data.error)
+        ? data.error : "upstream_error";
+      throw new ProviderError(code, response.status);
+    }
+    return response;
+  }
+  const post = (path: string, body: Record<string, string>) => send(path, {
+    method: "POST", headers: { "Content-Type": "application/json", Accept: "application/json" },
+    body: JSON.stringify({ ...body, client_id: config.clientId, client_secret: config.clientSecret }),
+  });
+  async function token(body: Record<string, string>, rotating = false): Promise<TokenSet> {
+    const data: unknown = await (await post("/auth/oauth/token", body)).json();
+    if (!record(data) || typeof data.access_token !== "string" || !data.access_token ||
+        data.token_type !== "Bearer" ||
+        (data.refresh_token !== undefined && (typeof data.refresh_token !== "string" || !data.refresh_token)) ||
+        (rotating && !data.refresh_token) ||
+        (data.scope !== undefined && typeof data.scope !== "string")) {
+      throw new Error("Invalid token response.");
+    }
+    return {
+      accessToken: data.access_token, refreshToken: data.refresh_token as string | undefined,
+      scopes: typeof data.scope === "string" ? [...new Set(data.scope.split(" ").filter(Boolean))] : [],
+    };
+  }
+  async function verify(tokens: TokenSet, expectedSubject?: string): Promise<Identity> {
+    // Rita ID currently omits issuer/token_use; do not invent OIDC guarantees.
+    let payload;
+    try {
+      ({ payload } = await jwtVerify(tokens.accessToken, key, {
+        algorithms: ["RS256"], audience: config.clientId,
+        requiredClaims: ["sub", "aud", "exp"], currentDate: new Date(now()),
+      }));
+    } catch (error) {
+      // A JWKS outage is retryable with the SAME new access token, not another rotation.
+      const code = (error as { code?: string }).code;
+      if (code === "ERR_JWKS_TIMEOUT" || error instanceof TypeError) throw error;
+      throw new InvalidIdentityError();
+    }
+    if (!validSubject(payload.sub) || payload.isClient === true ||
+        typeof payload.exp !== "number" ||
+        (expectedSubject !== undefined && payload.sub !== expectedSubject)) {
+      throw new InvalidIdentityError();
+    }
+    const data: unknown = await (await send("/auth/oauth/userinfo", {
+      headers: { Authorization: "Bearer " + tokens.accessToken, Accept: "application/json" },
+    })).json();
+    try {
+      const profile = parseProfile(data, payload.sub);
+      if (payload.exp * 1000 <= now()) throw new InvalidIdentityError();
+      return { profile, expiresAt: payload.exp * 1000 };
+    } catch { throw new InvalidIdentityError(); }
+  }
+  async function revoke(refreshToken: string) {
+    // The endpoint has an empty successful body.
+    await post("/auth/oauth/revoke", { token: refreshToken });
   }
   return {
     async exchange(code, verifier) {
-      const result = await json("/auth/oauth/token", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Accept: "application/json",
-        },
-        body: JSON.stringify({
-          grant_type: "authorization_code",
-          redirect_uri: config.callbackUrl,
-          code,
-          code_verifier: verifier,
-          client_id: config.clientId,
-          client_secret: config.clientSecret,
-        }),
+      const tokens = await token({
+        grant_type: "authorization_code", redirect_uri: config.callbackUrl,
+        code, code_verifier: verifier,
       });
-      if (
-        !record(result) ||
-        typeof result.access_token !== "string" ||
-        result.token_type !== "Bearer"
-      ) {
-        throw new Error("Invalid token response.");
+      try { return { ...await verify(tokens), tokens }; }
+      catch (error) {
+        if (tokens.refreshToken) await revoke(tokens.refreshToken).catch(() => undefined);
+        throw error;
       }
-      // Current Rita ID tokens have no issuer or token_use. Trust is anchored
-      // to the configured JWKS origin, signature, audience and userinfo match.
-      const { payload } = await jwtVerify(result.access_token, key, {
-        algorithms: ["RS256"],
-        audience: config.clientId,
-        requiredClaims: ["sub", "aud", "exp"],
-        currentDate: new Date(now()),
-      });
-      if (
-        !validSubject(payload.sub) ||
-        payload.isClient === true ||
-        typeof payload.exp !== "number"
-      ) {
-        throw new Error("Invalid user token.");
-      }
-      const data = await json("/auth/oauth/userinfo", {
-        headers: {
-          Authorization: "Bearer " + result.access_token,
-          Accept: "application/json",
-        },
-      });
-      const profile = parseProfile(data, payload.sub);
-      if (payload.exp * 1000 <= now())
-        throw new Error("Token expired during login.");
-      // Deliberately discard all credentials after fetching the profile.
-      return { profile, expiresAt: payload.exp * 1000 };
     },
+    refresh: refreshToken => token({ grant_type: "refresh_token", refresh_token: refreshToken }, true),
+    verify, revoke,
   };
 }

@@ -1,3 +1,4 @@
+import { OAuthSessions } from "../src/auth/oauth-sessions.js";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import express from "express";
@@ -6,6 +7,12 @@ import { RitaAuthGuard } from "../src/auth/rita-auth.guard.js";
 import { createSessionMiddleware } from "../src/auth/session.js";
 import { readConfig } from "../src/config.js";
 
+const oauth = {
+  async exchange(): Promise<never> { throw new Error("Unexpected exchange"); },
+  async refresh(): Promise<never> { throw new Error("Unexpected refresh"); },
+  async verify(): Promise<never> { throw new Error("Unexpected verify"); },
+  async revoke() {},
+};
 const config = readConfig({
   RITA_CLIENT_ID: "test-client", RITA_CLIENT_SECRET: "test-secret",
   SESSION_SECRET: "s".repeat(32),
@@ -22,7 +29,7 @@ test("guard rejects missing session even with a bearer header or stale request a
     req.auth = { profile, expiresAt: Date.now() + 60_000 };
     next();
   });
-  app.get("/protected", new RitaAuthGuard().handle, (_req, res) => res.sendStatus(200));
+  app.get("/protected", new RitaAuthGuard({ sessions: new OAuthSessions(oauth) }).handle, (_req, res) => res.sendStatus(200));
   await request(app).get("/protected").set("Authorization", "Bearer arbitrary")
     .expect(401, { error: "not_authenticated" });
 });
@@ -30,15 +37,18 @@ test("guard rejects missing session even with a bearer header or stale request a
 test("guard independently enforces expiry and exposes only profile and expiry", async () => {
   let time = Date.now();
   const expiresAt = time + 60_000;
+  const sessions = new OAuthSessions(oauth, () => time);
   const app = express();
   app.use(createSessionMiddleware(config));
   // Test-only login fixture; no expireIdentity middleware is installed.
   app.post("/fixture", (req, res) => {
-    req.session.identity = { profile, expiresAt, csrf: "private-csrf" };
+    sessions.add(req.sessionID, { profile, expiresAt, tokens: { accessToken: "private-access", scopes: [] } }, expiresAt);
+    req.session.oauthId = req.sessionID;
+    req.session.csrf = "private-csrf";
     res.sendStatus(204);
   });
   let handled = 0;
-  app.get("/protected", new RitaAuthGuard({ now: () => time }).handle, (req, res) => {
+  app.get("/protected", new RitaAuthGuard({ sessions }).handle, (req, res) => {
     handled++;
     res.json(req.auth);
   });
@@ -59,7 +69,7 @@ test("redirect mode sends unauthenticated requests to the fixed login route", as
     req.session.pending = { state: "pending", verifier: "private", expiresAt: Date.now() + 60_000 };
     res.sendStatus(204);
   });
-  app.all("/protected", new RitaAuthGuard({ unauthenticated: "redirect" }).handle,
+  app.all("/protected", new RitaAuthGuard({ sessions: new OAuthSessions(oauth), unauthenticated: "redirect" }).handle,
     (_req, res) => res.sendStatus(200));
   const agent = request.agent(app);
   await agent.post("/fixture").expect(204);
