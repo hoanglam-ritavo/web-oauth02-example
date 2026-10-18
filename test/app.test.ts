@@ -17,18 +17,12 @@ const unusedOAuth = {
 const sub = "12345678-1234-4123-8123-123456789012";
 const profile = { sub, name: "Demo", email: "demo@example.com", employee_id: null, phone_number: null, is_developer: false, groups: "EMPLOYEE" as const };
 
-test("EJS escapes locals and serves same-origin browser assets under CSP", async () => {
+test("static SPA shell and same-origin assets use CSP", async () => {
   const app = createApp(config);
-  const html = await new Promise<string>((resolve, reject) => app.render("page", {
-    csrf: '\"><script>window.injected=true</script>', message: '<img src=x onerror="bad()">', status: undefined,
-  }, (error, output) => error ? reject(error) : resolve(output)));
-  assert.doesNotMatch(html, /<img|<script>window/);
-  assert.match(html, /&lt;img/);
   const home = await request(app).get("/").expect(200);
   assert.match(home.headers["content-security-policy"]!, /script-src 'self'/);
-  for (const path of ["app.js", "app.css", "axios.min.js"]) {
-    await request(app).get("/assets/" + path).expect(200);
-  }
+  assert.doesNotMatch(home.text, /demo-secret|fixture-access/);
+  for (const path of ["app.js", "app.css", "axios.min.js"]) await request(app).get("/assets/" + path).expect(200);
 });
 
 test("strategy JSON callback establishes a session usable by RitaAuthGuard", async () => {
@@ -83,7 +77,7 @@ test("starting another login and denying consent preserves the active identity",
   const before = await agent.get("/api/me").expect(200);
   const second = (await begin(agent)).url.searchParams.get("state");
   await agent.get("/api/me").expect(200, before.body);
-  await agent.get("/auth/callback").query({ state: second, error: "access_denied" }).expect(400);
+  await agent.get("/auth/callback").query({ state: second, error: "access_denied" }).expect(303);
   await agent.get("/api/me").expect(200, before.body);
   assert.equal(calls.length, 1);
 });
@@ -101,7 +95,7 @@ async function begin(agent: ReturnType<typeof request.agent>) {
   return { response, url: new URL(response.headers.location!) };
 }
 
-test("login builds PKCE redirect, callback rotates session and renders a token-free EJS shell", async () => {
+test("login builds PKCE redirect, callback rotates session and renders a token-free SPA shell", async () => {
   const { agent, calls } = setup();
   const { response, url } = await begin(agent);
   assert.equal(url.origin, config.portalUrl);
@@ -115,12 +109,12 @@ test("login builds PKCE redirect, callback rotates session and renders a token-f
   assert.ok(url.searchParams.get("state")!.length >= 43);
   assert.ok(!url.toString().includes(config.clientSecret));
   const cookie = String(response.headers["set-cookie"]);
-  assert.match(cookie, /rita_example\.sid=/);
+  assert.match(cookie, /rita_example\.key=/);
   assert.match(cookie, /HttpOnly/);
   assert.match(cookie, /SameSite=Lax/);
   assert.doesNotMatch(cookie, /Domain=|Secure/);
   const callback = await agent.get("/auth/callback").query({ state: url.searchParams.get("state"), code: "once" }).expect(302);
-  assert.equal(callback.headers.location, "/");
+  assert.equal(callback.headers.location, "/?auth=success");
   assert.notEqual(String(callback.headers["set-cookie"]).split(";")[0], cookie.split(";")[0]);
   assert.equal(createHash("sha256").update(calls[0]!.verifier).digest("base64url"), url.searchParams.get("code_challenge"));
   const me = await agent.get("/api/me").expect(200);
@@ -131,20 +125,20 @@ test("login builds PKCE redirect, callback rotates session and renders a token-f
   assert.match(home.text, /id="profile"/);
   assert.doesNotMatch(home.text, /alert/);
   assert.doesNotMatch(home.text, /<script>/);
-  await agent.get("/auth/callback").query({ state: url.searchParams.get("state"), code: "once" }).expect(400);
+  await agent.get("/auth/callback").query({ state: url.searchParams.get("state"), code: "once" }).expect(303);
   assert.equal(calls.length, 1);
 });
 
 test("missing, mismatched, duplicate, expired or superseded state never reaches token exchange", async () => {
   const { agent, calls, advance } = setup();
   const first = (await begin(agent)).url.searchParams.get("state")!;
-  await agent.get("/auth/callback?code=x").expect(400);
-  await agent.get("/auth/callback").query({ state: "bad", code: "x" }).expect(400);
-  await agent.get("/auth/callback").query({ state: [first, first], code: "x" }).expect(400);
+  await agent.get("/auth/callback?code=x").expect(303);
+  await agent.get("/auth/callback").query({ state: "bad", code: "x" }).expect(303);
+  await agent.get("/auth/callback").query({ state: [first, first], code: "x" }).expect(303);
   const second = (await begin(agent)).url.searchParams.get("state")!;
-  await agent.get("/auth/callback").query({ state: first, code: "x" }).expect(400);
+  await agent.get("/auth/callback").query({ state: first, code: "x" }).expect(303);
   advance(600_001);
-  await agent.get("/auth/callback").query({ state: second, code: "x" }).expect(400);
+  await agent.get("/auth/callback").query({ state: second, code: "x" }).expect(303);
   await agent.get("/api/me").expect(401, { error: "not_authenticated" });
   assert.equal(calls.length, 0);
 });
@@ -152,12 +146,12 @@ test("missing, mismatched, duplicate, expired or superseded state never reaches 
 test("denial validates and consumes state, missing code consumes the attempt", async () => {
   const { agent, calls } = setup();
   let state = (await begin(agent)).url.searchParams.get("state")!;
-  await agent.get("/auth/callback").query({ error: "access_denied", state: "wrong" }).expect(400);
-  await agent.get("/auth/callback").query({ error: "access_denied", state }).expect(400);
-  await agent.get("/auth/callback").query({ code: "x", state }).expect(400);
+  await agent.get("/auth/callback").query({ error: "access_denied", state: "wrong" }).expect(303);
+  await agent.get("/auth/callback").query({ error: "access_denied", state }).expect(303);
+  await agent.get("/auth/callback").query({ code: "x", state }).expect(303);
   state = (await begin(agent)).url.searchParams.get("state")!;
-  await agent.get("/auth/callback").query({ state }).expect(400);
-  await agent.get("/auth/callback").query({ state, code: "x" }).expect(400);
+  await agent.get("/auth/callback").query({ state }).expect(303);
+  await agent.get("/auth/callback").query({ state, code: "x" }).expect(303);
   assert.equal(calls.length, 0);
 });
 
@@ -167,7 +161,7 @@ test("parallel callbacks exchange the code only once", async () => {
   const cookie = String(response.headers["set-cookie"]).split(";")[0]!;
   const results = await Promise.all([1, 2].map(() => request(app).get("/auth/callback")
     .set("Cookie", cookie).query({ state: url.searchParams.get("state"), code: "x" })));
-  assert.deepEqual(results.map(r => r.status).sort(), [302, 400]);
+  assert.deepEqual(results.map(r => r.status).sort(), [302, 303]);
   assert.equal(calls.length, 1);
 });
 
@@ -196,9 +190,8 @@ test("session expires at token expiry, restart loses session, logout requires CS
   await request(restarted).get("/api/me").set("Cookie", String(login.headers["set-cookie"]).split(";")[0]!).expect(401);
   await agent.post("/auth/logout").expect(403);
   await agent.post("/auth/logout").type("form").send({ csrf: "wrong" }).expect(403);
-  const home = await agent.get("/");
-  const csrf = /name="csrf" value="([^"]+)"/.exec(home.text)![1]!;
-  await agent.post("/auth/logout").type("form").send({ csrf }).expect(303);
+  const csrf = (await agent.get("/api/session")).body.csrf;
+  await agent.post("/auth/logout").type("form").send({ csrf }).expect(200);
   await agent.get("/api/me").expect(401);
   const nextState = (await begin(agent)).url.searchParams.get("state");
   await agent.get("/auth/callback").query({ state: nextState, code: "y" }).expect(302);
@@ -223,10 +216,10 @@ test("upstream errors are generic, consumed, and never create a session", async 
   const app = createApp(config, { oauth: { ...unusedOAuth, async exchange() { throw new Error("sensitive-token-and-secret"); } } });
   const agent = request.agent(app);
   const state = (await begin(agent)).url.searchParams.get("state");
-  const error = await agent.get("/auth/callback").query({ state, code: "x" }).expect(502);
+  const error = await agent.get("/auth/callback").query({ state, code: "x" }).expect(303);
   assert.doesNotMatch(error.text, /sensitive-token-and-secret/);
   await agent.get("/api/me").expect(401);
-  await agent.get("/auth/callback").query({ state, code: "x" }).expect(400);
+  await agent.get("/auth/callback").query({ state, code: "x" }).expect(303);
 });
 
 test("HTTPS hosting emits a Secure cookie", async () => {
@@ -244,7 +237,7 @@ test("configuration rejects production, invalid origins, empty secrets and place
     { NODE_ENV: "production" }, { SESSION_MAX_AGE_HOURS: "0" }, { SESSION_MAX_AGE_HOURS: "NaN" }, { SESSION_MAX_AGE_HOURS: "25" }, { PORT: "0" }, { PORT: "NaN" },
     { APP_BASE_URL: "ftp://example.com" }, { APP_BASE_URL: "https://a/b" },
     { RITA_PORTAL_URL: "https://a/b" },
-    { RITA_PORTAL_URL: "https://user:pass@example.com" }, { SESSION_SECRET: "short" },
+    { RITA_PORTAL_URL: "https://user:pass@example.com" }, { MAX_SESSION_ENTRIES: "0" },
     { RITA_CLIENT_SECRET: "" }, { RITA_CLIENT_ID: "replace-me" },
   ]) assert.throws(() => readConfig({ ...env, ...extra }));
 });

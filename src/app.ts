@@ -6,12 +6,10 @@ import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import type { Config } from "./config.js";
 import { createOAuthClient, type OAuthClient } from "./auth/oauth-client.js";
-import { createPendingClaims } from "./auth/pending-claims.js";
 import { OAuthSessions, SessionError } from "./auth/oauth-sessions.js";
-import { createSessionMiddleware, destroySession, wantsJson } from "./auth/session.js";
+import { createSessionMiddleware } from "./auth/session.js";
 import { createAuthRouter } from "./auth/routes.js";
 import { createPublicRouter } from "./routes/public.js";
-import { renderPage } from "./views/page.js";
 
 export function createApp(config: Config, options: {
   oauth?: OAuthClient; now?: () => number; callbackResponse?: "redirect" | "json";
@@ -19,12 +17,9 @@ export function createApp(config: Config, options: {
   const app = express();
   const now = options.now ?? Date.now;
   const oauth = options.oauth ?? createOAuthClient(config, { now });
-  const pendingClaims = createPendingClaims(now);
-  const sessions = new OAuthSessions(oauth, now);
+  const sessions = new OAuthSessions(oauth, now, config.maxSessionEntries);
   if (config.secureCookie) app.set("trust proxy", "loopback");
   app.disable("x-powered-by");
-  app.set("view engine", "ejs");
-  app.set("views", fileURLToPath(new URL("./views", import.meta.url)));
   app.use(helmet({
     strictTransportSecurity: config.secureCookie ? undefined : false,
     contentSecurityPolicy: { directives: { "upgrade-insecure-requests": config.secureCookie ? [] : null } },
@@ -37,37 +32,28 @@ export function createApp(config: Config, options: {
   app.use("/assets", express.static(fileURLToPath(new URL("./public", import.meta.url))));
   app.use(express.json({ limit: "4kb" }));
   app.use(express.urlencoded({ extended: false, limit: "4kb" }));
-  app.use(createSessionMiddleware(config));
-  app.use((req, _res, next) => {
-    if (req.session.deadline) req.session.cookie.maxAge = Math.max(0, req.session.deadline - now());
+  app.use(createSessionMiddleware(config, sessions));
+  app.use((req, res, next) => {
+    if (req.method === "POST" && req.get("Origin") !== undefined && req.get("Origin") !== config.appUrl) {
+      res.status(403).json({ error: "invalid_origin" }); return;
+    }
     next();
   });
-  app.use(createPublicRouter(sessions));
-  app.use(createAuthRouter({ config, oauth, now, sessions, pendingClaims, callbackResponse: options.callbackResponse }));
-  app.use((_req, res) => res.status(404).send("Not found"));
+  app.use(createPublicRouter(sessions, config, now));
+  app.use(createAuthRouter({ config, oauth, now, sessions, callbackResponse: options.callbackResponse }));
+  app.use((req, res) => {
+    const reserved = /^\/(api|auth|assets)(\/|$)/.test(req.path);
+    if (req.method === "GET" && !reserved && !req.path.split("/").pop()?.includes(".") && req.accepts("html")) {
+      res.sendFile(fileURLToPath(new URL("./public/index.html", import.meta.url)));
+    } else res.status(404).json({ error: "not_found" });
+  });
   const onError: ErrorRequestHandler = async (error, req, res, _next) => {
-    const status = error instanceof SessionError ? error.status : 500;
-    const code = error instanceof SessionError ? error.code : "internal_error";
+    const parserStatus = error?.type === "entity.parse.failed" ? 400 : error?.type === "entity.too.large" ? 413 : undefined;
+    const status = error instanceof SessionError ? error.status : parserStatus ?? 500;
+    const code = error instanceof SessionError ? error.code : parserStatus === 400 ? "invalid_body" : parserStatus === 413 ? "body_too_large" : "internal_error";
     if (error instanceof SessionError && error.retryAfter) res.set("Retry-After", String(error.retryAfter));
-    if (status === 401) {
-      try {
-        if (req.session?.oauthId) await sessions.close(req.session.oauthId);
-        await destroySession(req, res);
-      } catch { res.status(500).json({ error: "internal_error" }); return; }
-    }
-    if (wantsJson(req)) {
-      res.status(status).json({ error: code });
-      return;
-    }
-    const messages: Record<string, string> = {
-      forbidden: "Bạn không có quyền truy cập tài nguyên này.",
-      not_authenticated: "Phiên đã kết thúc. Vui lòng đăng nhập lại.",
-      integration_error: "Lỗi tích hợp: kiểm tra client credentials, grant và scope. Đăng nhập lại không tự sửa cấu hình.",
-      temporarily_unavailable: "Rita ID tạm thời không khả dụng. Thử lại sau ít nhất 5 giây.",
-      refresh_unavailable: "Phiên này không có refresh token.",
-      internal_error: "Có lỗi xử lý yêu cầu. Vui lòng thử lại.",
-    };
-    renderPage(res.status(status), req.session?.csrf, messages[code] ?? messages.internal_error);
+    if (status === 401 && req.browserId) await sessions.close(req.browserId);
+    res.status(status).json({ error: code });
   };
   app.use(onError);
   return app;

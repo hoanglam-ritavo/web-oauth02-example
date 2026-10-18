@@ -7,14 +7,14 @@ export interface Config {
   apiUrl: string;
   clientId: string;
   clientSecret: string;
-  sessionSecret: string;
+  maxSessionEntries: number;
   callbackUrl: string;
   secureCookie: boolean;
 }
 
 export function readConfig(env: NodeJS.ProcessEnv): Config {
   if (env.NODE_ENV === "production")
-    throw new Error("Demo uses MemoryStore: production is disabled.");
+    throw new Error("Demo uses RAM: production is disabled.");
   const port = Number(env.PORT ?? "3003");
   if (!Number.isInteger(port) || port < 1 || port > 65535)
     throw new Error("PORT must be 1–65535.");
@@ -74,6 +74,9 @@ export function readConfig(env: NodeJS.ProcessEnv): Config {
   const sessionHours = Number(env.SESSION_MAX_AGE_HOURS ?? "8");
   if (!Number.isFinite(sessionHours) || sessionHours <= 0 || sessionHours > 24)
     throw new Error("SESSION_MAX_AGE_HOURS must be greater than 0 and at most 24.");
+  const maxSessionEntries = Number(env.MAX_SESSION_ENTRIES ?? "10000");
+  if (!Number.isSafeInteger(maxSessionEntries) || maxSessionEntries < 1)
+    throw new Error("MAX_SESSION_ENTRIES must be a positive safe integer.");
   const appUrl = origin("APP_BASE_URL", "http://localhost:3003");
   return {
     port,
@@ -83,7 +86,7 @@ export function readConfig(env: NodeJS.ProcessEnv): Config {
     apiUrl: apiBaseUrl(),
     clientId: secret("RITA_CLIENT_ID"),
     clientSecret: secret("RITA_CLIENT_SECRET"),
-    sessionSecret: secret("SESSION_SECRET", 32),
+    maxSessionEntries,
     callbackUrl: appUrl + "/auth/callback",
     secureCookie: appUrl.startsWith("https:"),
   };

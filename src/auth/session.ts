@@ -1,37 +1,37 @@
 import type { Request, RequestHandler, Response } from "express";
-import session from "express-session";
 import type { Config } from "../config.js";
 import type { Identity } from "./oauth-client.js";
+import { OAuthSessions, keyHash } from "./oauth-sessions.js";
 
-declare global { namespace Express { interface Request { auth?: Identity } } }
-declare module "express-session" {
-  interface SessionData {
-    pending?: { state: string; verifier: string; expiresAt: number };
-    oauthId?: string;
-    csrf?: string;
-    deadline?: number;
-  }
-}
-export const cookieName = "rita_example.sid";
+declare global { namespace Express { interface Request { auth?: Identity; browserId?: string } } }
+export const cookieName = "rita_example.key";
 export const sessionCookie = (config: Config) => ({
   httpOnly: true, sameSite: "lax" as const, secure: config.secureCookie, path: "/",
 });
-export function createSessionMiddleware(config: Config): RequestHandler {
-  return session({
-    name: cookieName, secret: config.sessionSecret, resave: false, saveUninitialized: false,
-    cookie: { ...sessionCookie(config), maxAge: 10 * 60_000 },
-  });
+export function createSessionMiddleware(config: Config, sessions: OAuthSessions): RequestHandler {
+  return (req, res, next) => {
+    const cookies = (req.headers.cookie ?? "").split(";").map(value => value.trim());
+    const values = cookies.filter(value => value.split("=", 1)[0] === cookieName);
+    const key = values.length === 1 ? values[0]!.slice(cookieName.length + 1) : "";
+    if (/^[A-Za-z0-9_-]{43}$/.test(key)) {
+      const id = keyHash(key);
+      if (sessions.browser(id)) req.browserId = id;
+    }
+    // Never clear an invalid key on a read response: a late response could erase a newer login cookie.
+    if (cookies.some(value => value.startsWith("rita_example.sid=")))
+      res.clearCookie("rita_example.sid", sessionCookie(config));
+    next();
+  };
 }
-export const saveSession = (req: Request): Promise<void> =>
-  new Promise((resolve, reject) => req.session.save(error => error ? reject(error) : resolve()));
-export const regenerateSession = (req: Request): Promise<void> =>
-  new Promise((resolve, reject) => req.session.regenerate(error => error ? reject(error) : resolve()));
-
-export async function destroySession(req: Request, res: Response) {
-  const secure = req.session?.cookie.secure === true;
-  if (req.session) await new Promise<void>((resolve, reject) =>
-    req.session.destroy(error => error ? reject(error) : resolve()));
-  res.clearCookie(cookieName, { httpOnly: true, sameSite: "lax", secure, path: "/" });
+export function ensureBrowser(req: Request, res: Response, config: Config, sessions: OAuthSessions, now: () => number) {
+  if (!sessions.browser(req.browserId)) {
+    const created = sessions.create();
+    req.browserId = created.id;
+    setBrowserCookie(res, config, created.key, created.deadline - now());
+  }
+  return sessions.browser(req.browserId)!;
 }
-export const wantsJson = (req: Request) => req.path.startsWith("/api/") ||
-  req.get("Accept")?.includes("application/json") === true;
+export function setBrowserCookie(res: Response, config: Config, key: string, maxAge: number) {
+  res.cookie(cookieName, key, { ...sessionCookie(config), maxAge: Math.max(0, maxAge) });
+}
+export const clearBrowserCookie = (res: Response, config: Config) => res.clearCookie(cookieName, sessionCookie(config));

@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Rita OAuth Example</title>
+<link rel="stylesheet" href="/assets/app.css">
+<script src="/assets/axios.min.js" defer></script><script src="/assets/app.js" defer></script>
+</head><body><main data-state="bootstrapping" aria-busy="true">
+<h1>Rita OAuth Example</h1>
+<p>Sign in with Rita ID. OAuth tokens stay on the server; your browser keeps an HttpOnly reference cookie.</p>
+<p id="notice" role="status" aria-live="polite">Loading session...</p>
+<nav class="actions"><a id="login" href="/auth/login" hidden>Login with Rita ID</a>
+<button id="retry" type="button">Reload status</button><button id="logout" type="button" hidden>Sign out of example</button></nav>
+<section id="authenticated" hidden>
+<h2>Rita ID profile</h2><pre id="profile"></pre>
+<div class="actions"><button id="load-profile" type="button">Load profile</button>
+<button id="load-private" type="button">Call private API</button><button id="refresh" type="button">Refresh now</button></div>
+<p id="no-refresh" hidden>No refresh token. Sign in again when the access token expires.</p>
+<h2>Session status</h2><pre id="session"></pre><h2>Private API result</h2><pre id="result"></pre>
+</section><noscript>Enable JavaScript to use this example.</noscript>
+<footer>Single-process RAM demo. Restart loses sessions. Signing out here does not sign out of Rita ID SSO.</footer>
+</main></body></html>

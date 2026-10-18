@@ -1,9 +1,8 @@
 import request from "supertest";
-import session from "express-session";
 import { createServer } from "node:http";
 import { once } from "node:events";
 import { createApp } from "../src/app.js";
-﻿import { test } from "node:test";
+import { test } from "node:test";
 import assert from "node:assert/strict";
 import { generateKeyPair, SignJWT, createLocalJWKSet, exportJWK } from "jose";
 import { createOAuthClient } from "./provider-fixture.js";
@@ -15,9 +14,9 @@ const now = Math.floor(Date.now() / 1000);
 const keys = await generateKeyPair("RS256");
 const otherKeys = await generateKeyPair("RS256");
 const key = createLocalJWKSet({ keys: [{ ...await exportJWK(keys.publicKey), kid: "demo", alg: "RS256", use: "sig" }] });
-async function token(options: { isClient?: boolean; alg?: string; noAud?: boolean; noSub?: boolean; aud?: string; exp?: number; sub?: string; wrongKey?: boolean; noExp?: boolean } = {}) {
-  const signer = new SignJWT({ ...(options.noSub ? {} : { sub: options.sub ?? subject }), ...(options.isClient ? { isClient: true } : {}) })
-    .setProtectedHeader({ alg: options.alg ?? "RS256", kid: "demo" }).setIssuedAt(now);
+async function token(options: { isClient?: boolean; alg?: string; noAud?: boolean; noSub?: boolean; aud?: string; exp?: number; sub?: string; wrongKey?: boolean; noExp?: boolean; noKid?: boolean; kid?: string } = {}) {
+  const signer = new SignJWT({ token_use: "oauth_access", ...(options.noSub ? {} : { sub: options.sub ?? subject }), ...(options.isClient ? { isClient: true } : {}) })
+    .setProtectedHeader({ alg: options.alg ?? "RS256", ...(options.noKid ? {} : { kid: options.kid ?? "demo" }) }).setIssuedAt(now);
   if (!options.noAud) signer.setAudience(options.aud ?? "client");
   if (!options.noExp) signer.setExpirationTime(options.exp ?? now + 300);
   return signer.sign(options.alg === "HS256" ? new TextEncoder().encode("test-only-secret-at-least-32-characters") : options.wrongKey ? otherKeys.privateKey : keys.privateKey);
@@ -104,6 +103,7 @@ test("exchanges through an API prefix including real remote JWKS verification", 
 
 for (const [label, options] of Object.entries({
   "client token": { isClient: true }, "wrong algorithm": { alg: "HS256" },
+  "missing kid": { noKid: true }, "unknown kid": { kid: "unknown" },
   "missing audience": { noAud: true }, "missing subject": { noSub: true },
   "wrong signature": { wrongKey: true }, "wrong audience": { aud: "another-client" },
   "expired token": { exp: now - 1 }, "missing expiry": { noExp: true }, "invalid subject": { sub: "not-a-uuid" },
@@ -183,18 +183,11 @@ test("rejects a token that expires while fetching userinfo", async () => {
   await assert.rejects(createOAuthClient(config, { fetch, key, now: () => time }).exchange("code", "verifier"));
 });
 
-test("real adapter keeps credentials outside Express session and revokes on logout", async (t) => {
+test("real adapter keeps credentials outside SPA metadata and revokes on logout", async () => {
   let time = now * 1000;
   const accessToken = await token();
   const { fetcher, calls } = mockFetch(accessToken);
   const saved: string[] = [];
-  const originalSet = session.MemoryStore.prototype.set;
-  t.mock.method(session.MemoryStore.prototype, "set", function (
-    this: session.MemoryStore, ...args: Parameters<typeof originalSet>
-  ) {
-    saved.push(JSON.stringify(args[1]));
-    return originalSet.apply(this, args);
-  });
   const oauth = createOAuthClient(config, { fetch: fetcher, key, now: () => time });
   const app = createApp(config, { oauth, now: () => time });
   const agent = request.agent(app);
@@ -209,11 +202,11 @@ test("real adapter keeps credentials outside Express session and revokes on logo
   time += 200_000;
   await agent.get("/api/me").expect(200);
   assert.equal(calls.length, 4);
-  const csrf = /name="csrf" value="([^"]+)"/.exec(home.text)![1]!;
-  await agent.post("/auth/logout").type("form").send({ csrf }).expect(303);
+    const csrf = (await agent.get("/api/session")).body.csrf;
+  await agent.post("/auth/logout").type("form").send({ csrf }).expect(200);
   await agent.get("/api/me").expect(401, { error: "not_authenticated" });
   assert.equal(calls.length, 5);
-  assert.ok(saved.some(value => value.includes('"oauthId"')));
+  assert.equal(saved.length, 0);
   for (const value of [...saved, home.text, JSON.stringify(me.body)]) {
     assert.ok(!value.includes(accessToken));
     assert.doesNotMatch(value, /discard-id|discard-refresh|accessToken|refreshToken|id_token|client_secret/);

@@ -12,24 +12,26 @@
     "start": "node dist/server.js",
     "typecheck": "tsc --noEmit",
     "test": "tsx --test test/*.test.ts",
-    "test:browser": "npm run build && node test/browser-smoke.mjs"
+    "test:browser": "npm run build && node test/browser-smoke.mjs",
+    "lint": "eslint ."
   },
   "dependencies": {
     "axios": "^1.20.0",
     "dotenv": "^17.2.3",
-    "ejs": "^7.0.1",
     "express": "^5.1.0",
-    "express-session": "^1.18.2",
     "helmet": "^8.1.0",
     "jose": "^6.1.0"
   },
   "devDependencies": {
+    "@eslint/js": "^10.0.1",
     "@types/express": "^5.0.0",
-    "@types/express-session": "^1.18.2",
     "@types/node": "^24.0.0",
     "@types/supertest": "^6.0.3",
+    "eslint": "^10.13.0",
+    "globals": "^17.13.0",
     "supertest": "^7.1.4",
     "tsx": "^4.20.0",
-    "typescript": "^5.9.3"
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.71.2"
   }
 }

@@ -35,7 +35,7 @@ export function createOAuthClient(config: Config, options: {
     ...(options.adapter ? { adapter: options.adapter } : {}),
   });
   const key = options.key ?? createRemoteJWKSet(
-    new URL(config.apiUrl + "/.well-known/jwks.json"), { timeoutDuration: timeoutMs },
+    new URL(config.apiUrl + "/.well-known/jwks.json"), { timeoutDuration: timeoutMs, cooldownDuration: 0 },
   );
   async function send(path: string, init: RequestInit): Promise<Response> {
     let response: Response;
@@ -75,25 +75,28 @@ export function createOAuthClient(config: Config, options: {
     };
   }
   async function verify(tokens: TokenSet, expectedSubject?: string): Promise<Identity> {
-    // Rita ID currently omits issuer/token_use; do not invent OIDC guarantees.
+    // Token purpose is mandatory; Rita ID still does not provide a complete OIDC issuer contract.
     let payload;
     try {
-      ({ payload } = await jwtVerify(tokens.accessToken, key, {
+      ({ payload } = await jwtVerify(tokens.accessToken, async (header, token) => {
+        if (typeof header.kid !== "string" || !header.kid) throw new InvalidIdentityError();
+        return key(header, token);
+      }, {
         algorithms: ["RS256"], audience: config.clientId,
-        requiredClaims: ["sub", "aud", "exp"], currentDate: new Date(now()),
+        requiredClaims: ["sub", "aud", "exp", "token_use"], currentDate: new Date(now()),
       }));
     } catch (error) {
       // A JWKS outage is retryable with the SAME new access token, not another rotation.
       const code = (error as { code?: string }).code;
-      if (code === "ERR_JWKS_TIMEOUT" || error instanceof TypeError) throw error;
+      if (["ERR_JWKS_TIMEOUT", "ERR_JOSE_GENERIC", "ERR_JWKS_INVALID", "ERR_JWK_INVALID"].includes(code ?? "") || error instanceof TypeError) throw error;
       if (code === "ERR_JWT_EXPIRED") {
-        const expired = (error as { payload: { sub?: unknown; isClient?: unknown } }).payload;
-        if (validSubject(expired.sub) && expired.isClient !== true &&
+        const expired = (error as { payload: { sub?: unknown; isClient?: unknown; token_use?: unknown } }).payload;
+        if (validSubject(expired.sub) && expired.isClient !== true && expired.token_use === "oauth_access" &&
             (expectedSubject === undefined || expired.sub === expectedSubject)) throw new AccessExpiredError();
       }
       throw new InvalidIdentityError();
     }
-    if (!validSubject(payload.sub) || payload.isClient === true ||
+    if (!validSubject(payload.sub) || payload.isClient === true || payload.token_use !== "oauth_access" ||
         typeof payload.exp !== "number" ||
         (expectedSubject !== undefined && payload.sub !== expectedSubject)) {
       throw new InvalidIdentityError();

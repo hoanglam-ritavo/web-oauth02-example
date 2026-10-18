@@ -2,7 +2,6 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { setTimeout as delay } from "node:timers/promises";
 import request from "supertest";
-import session from "express-session";
 import { generateKeyPair, SignJWT, createLocalJWKSet, exportJWK } from "jose";
 import { createApp } from "../src/app.js";
 import { createOAuthClient } from "./provider-fixture.js";
@@ -35,7 +34,7 @@ function fixture(options: { refresh?: boolean; lifetime?: number } = {}) {
     revokeFails: false,
   };
   async function issue() {
-    const accessToken = await new SignJWT({ sub: state.subject })
+    const accessToken = await new SignJWT({ token_use: "oauth_access", sub: state.subject })
       .setProtectedHeader({ alg: "RS256", kid: "demo" }).setAudience(config.clientId)
       .setExpirationTime(Math.floor(time / 1000) + 300).sign(keys.privateKey);
     state.currentRefresh = "fixture-refresh-" + ++state.sequence;
@@ -96,7 +95,7 @@ function fixture(options: { refresh?: boolean; lifetime?: number } = {}) {
     const pending = await begin();
     const response = await agent.get("/auth/callback").query({ state: pending, code: "fixture-code" }).expect(302);
     const home = await agent.get("/").expect(200);
-    const csrf = /name="csrf" value="([^"]+)"/.exec(home.text)![1]!;
+    const csrf = (await agent.get("/api/session")).body.csrf;
     return { csrf, cookie: String(response.headers["set-cookie"]).split(";")[0]!, home: home.text };
   };
   return { config, state, app, agent, begin, login, advance: (ms: number) => { time += ms; }, time: () => time };
@@ -105,11 +104,11 @@ function fixture(options: { refresh?: boolean; lifetime?: number } = {}) {
 test("automatic refresh extends access but not local deadline and updates profile", async () => {
   const f = fixture();
   await f.login();
-  const before = (await f.agent.get("/api/session").expect(200)).body;
+  const before = (await f.agent.get("/api/session").expect(200)).body.session;
   f.advance(300_000);
   f.state.name = "Updated Employee";
   await f.agent.get("/api/me").expect(200).expect(r => assert.equal(r.body.name, "Updated Employee"));
-  const after = (await f.agent.get("/api/session").expect(200)).body;
+  const after = (await f.agent.get("/api/session").expect(200)).body.session;
   assert.equal(f.state.refreshes, 1);
   assert.equal(after.refreshCount, 1);
   assert.equal(after.lastRefreshAt, f.time());
@@ -155,9 +154,9 @@ test("userinfo rejection with unexpired JWT never refreshes and clears the brows
   await f.login();
   f.state.beforeUserinfo = async () => new Response(null, { status: 401 });
   const response = await f.agent.get("/api/private/example").expect(401);
-  assert.match(String(response.headers["set-cookie"]), /Expires=Thu, 01 Jan 1970/);
+  assert.equal(response.headers["set-cookie"], undefined); // Late reads must not erase a newer cookie.
   assert.equal(f.state.refreshes, 0);
-  await f.agent.get("/api/session").expect(401);
+  await f.agent.get("/api/session").expect(200).expect(r => assert.equal(r.body.authenticated, false));
 });
 
 test("userinfo 403 denies the resource without refresh or destroying the session", async () => {
@@ -221,9 +220,9 @@ test("manual refresh requires CSRF, rotates every deliberate request and never c
   await f.agent.post("/auth/refresh").type("form").send({ csrf: "bad" }).expect(403);
   assert.equal(f.state.refreshes, 0);
   const previous = f.state.currentRefresh;
-  await f.agent.post("/auth/refresh").type("form").send({ csrf }).expect(303);
+  await f.agent.post("/auth/refresh").type("form").send({ csrf }).expect(200);
   assert.notEqual(f.state.currentRefresh, previous);
-  await f.agent.post("/auth/refresh").type("form").send({ csrf }).expect(303);
+  await f.agent.post("/auth/refresh").type("form").send({ csrf }).expect(200);
   assert.equal(f.state.refreshes, 2);
   assert.ok(f.state.calls.every(c => !c.path.endsWith("/auth/refresh")));
 });
@@ -243,11 +242,11 @@ test("concurrent automatic and manual requests share one rotation", async () => 
   await delay(30);
   release.resolve();
   const results = await Promise.all([first, ...others]);
-  assert.deepEqual(results.map(r => r.status), [200, 200, 303]);
+  assert.deepEqual(results.map(r => r.status), [200, 200, 200]);
   assert.equal(f.state.refreshes, 1);
   f.state.beforeRefresh = undefined;
-  await f.agent.post("/auth/refresh").type("form").send({ csrf }).expect(303);
-  assert.equal(f.state.refreshes, 2); // Uses replacement, never a stale Express session copy.
+  await f.agent.post("/auth/refresh").type("form").send({ csrf }).expect(200);
+  assert.equal(f.state.refreshes, 2); // Uses replacement, never a stale SPA metadata copy.
 });
 
 test("HRM 503 keeps refresh token, imposes cooldown and safely retries", async () => {
@@ -273,7 +272,7 @@ test("userinfo outage after rotation retries the NEW access token without rotati
   f.advance(300_000);
   f.state.beforeUserinfo = async () => new Response("private upstream detail", { status: 503 });
   await f.agent.get("/api/me").expect(503);
-  const status = (await f.agent.get("/api/session").expect(200)).body;
+  const status = (await f.agent.get("/api/session").expect(200)).body.session;
   assert.equal(status.verificationPending, true);
   assert.equal(status.refreshCount, 0);
   await f.agent.get("/api/me").expect(503);
@@ -282,7 +281,7 @@ test("userinfo outage after rotation retries the NEW access token without rotati
   f.state.beforeUserinfo = undefined;
   await f.agent.get("/api/me").expect(200);
   assert.equal(f.state.refreshes, 1);
-  assert.equal((await f.agent.get("/api/session")).body.refreshCount, 1);
+  assert.equal((await f.agent.get("/api/session")).body.session.refreshCount, 1);
 });
 
 for (const failure of ["timeout", "lost-response", "malformed-json", "missing-replacement", "server-error"]) {
@@ -314,7 +313,7 @@ test("invalid_grant ends session; configuration errors remain explicit without r
     await f.agent.get("/api/me").expect(status, { error: code === "invalid_grant" ? "not_authenticated" : "integration_error" });
     await f.agent.get("/api/me").expect(status);
     assert.equal(f.state.refreshes, 1);
-    if (status === 502) await f.agent.get("/").expect(502).expect(r => assert.equal(r.headers.location, undefined));
+    if (status === 502) await f.agent.get("/api/session").expect(502).expect(r => assert.equal(r.headers.location, undefined));
   }
 });
 
@@ -340,8 +339,8 @@ test("refresh refuses mismatched userinfo and revokes replacement", async () => 
 test("without refresh token expiry requires login and UI explains the limitation", async () => {
   const f = fixture({ refresh: false });
   const { csrf, home } = await f.login();
-  assert.match(home, /Không có refresh token/);
-  assert.equal((await f.agent.get("/api/session").expect(200)).body.canRefresh, false);
+  assert.match(home, /No refresh token/);
+  assert.equal((await f.agent.get("/api/session").expect(200)).body.session.canRefresh, false);
   await f.agent.post("/auth/refresh").type("form").send({ csrf }).expect(409);
   f.advance(300_001);
   await f.agent.get("/api/me").expect(401);
@@ -371,7 +370,7 @@ test("logout waits for refresh and revokes latest token; old cookie cannot resto
   await delay(30);
   release.resolve();
   assert.equal((await refresh).status, 401);
-  assert.equal((await logout).status, 303);
+  assert.equal((await logout).status, 200);
   assert.deepEqual(f.state.revoked, [f.state.currentRefresh]);
   await request(f.app).get("/api/me").set("Cookie", cookie).expect(401);
 });
@@ -380,9 +379,8 @@ test("logout failure clears local identity and reports unconfirmed revocation", 
   const f = fixture();
   const { csrf, cookie } = await f.login();
   f.state.revokeFails = true;
-  await f.agent.post("/auth/logout").type("form").send({ csrf }).expect(303).expect("Location", "/?notice=revoke_unconfirmed");
+  await f.agent.post("/auth/logout").type("form").send({ csrf }).expect(200, { loggedOut: true, revokeConfirmed: false });
   await request(f.app).get("/api/me").set("Cookie", cookie).expect(401);
-  await f.agent.get("/?notice=revoke_unconfirmed").expect(200).expect(r => assert.match(r.text, /Chưa xác nhận/));
 });
 
 test("logout cancels a callback already exchanging its code", async () => {
@@ -393,9 +391,9 @@ test("logout cancels a callback already exchanging its code", async () => {
   f.state.beforeExchange = async () => { entered.resolve(); await release.promise; };
   const callback = f.agent.get("/auth/callback").query({ state, code: "late-code" }).then(r => r);
   await entered.promise;
-  await f.agent.post("/auth/logout").type("form").send({ csrf }).expect(303);
+  await f.agent.post("/auth/logout").type("form").send({ csrf }).expect(200);
   release.resolve();
-  assert.equal((await callback).status, 400);
+  assert.equal((await callback).status, 303);
   await f.agent.get("/api/me").expect(401);
   assert.equal(f.state.revoked.length, 2); // Old session and the canceled exchange.
 });
@@ -410,24 +408,17 @@ test("successful re-login revokes previous OAuth session and restart loses local
   await request(restarted).get("/api/me").set("Cookie", cookie).expect(401);
 });
 
-test("credentials and private profile never reach logs, cookies, or Express session", async t => {
+test("credentials and private profile never reach logs, cookies, or SPA metadata", async t => {
   const logs: unknown[][] = [];
   for (const method of ["log", "info", "warn", "error", "debug"] as const) t.mock.method(console, method, (...args: unknown[]) => { logs.push(args); });
   const saved: string[] = [];
-  const originalSet = session.MemoryStore.prototype.set;
-  t.mock.method(session.MemoryStore.prototype, "set", function (
-    this: session.MemoryStore, ...args: Parameters<typeof originalSet>
-  ) {
-    saved.push(JSON.stringify(args[1]));
-    return originalSet.apply(this, args);
-  });
   const f = fixture();
   const { csrf, cookie, home } = await f.login();
-  await f.agent.post("/auth/refresh").type("form").send({ csrf }).expect(303);
+  await f.agent.post("/auth/refresh").type("form").send({ csrf }).expect(200);
   const me = await f.agent.get("/api/me").expect(200);
   const status = await f.agent.get("/api/session").expect(200);
-  assert.deepEqual(Object.keys(status.body).sort(), ["accessExpiresAt", "sessionExpiresAt", "canRefresh", "scopes", "refreshCount", "lastRefreshAt", "verificationPending"].sort());
-  await f.agent.post("/auth/logout").type("form").send({ csrf }).expect(303);
+  assert.deepEqual(Object.keys(status.body.session).sort(), ["accessExpiresAt", "sessionExpiresAt", "canRefresh", "scopes", "refreshCount", "lastRefreshAt", "verificationPending"].sort());
+  await f.agent.post("/auth/logout").type("form").send({ csrf }).expect(200);
   const exposed = JSON.stringify([logs, saved, cookie, home, me.body, status.body]);
   for (const secret of [...f.state.issued, f.config.clientSecret, "fixture-id-token"]) {
     assert.ok(!exposed.includes(secret), "No credential exposure");
@@ -442,7 +433,7 @@ test("logout after failed refresh verification revokes replacement even before r
   f.advance(300_000);
   f.state.beforeUserinfo = async () => new Response("", { status: 503 });
   await f.agent.get("/api/me").expect(503);
-  await f.agent.post("/auth/logout").type("form").send({ csrf }).expect(303);
+  await f.agent.post("/auth/logout").type("form").send({ csrf }).expect(200);
   assert.deepEqual(f.state.revoked, [f.state.currentRefresh]);
   assert.equal(f.state.refreshes, 1);
 });
@@ -467,8 +458,8 @@ test("failed refresh destroys the local session even if revoke fails", async () 
   f.state.beforeRefresh = async () => Response.json({ error: "invalid_grant" }, { status: 400 });
   f.state.revokeFails = true;
   await f.agent.get("/api/me").expect(401);
-  await f.agent.post("/auth/logout").type("form").send({ csrf }).expect(403);
-  await f.agent.get("/api/session").expect(401);
+  await f.agent.post("/auth/logout").type("form").send({ csrf }).expect(200);
+  await f.agent.get("/api/session").expect(200).expect(r => assert.equal(r.body.authenticated, false));
 });
 
 test("idle expiry cleanup revokes without a browser request", async () => {

@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import express from "express";
 import request from "supertest";
 import { RitaAuthGuard } from "../src/auth/rita-auth.guard.js";
-import { createSessionMiddleware } from "../src/auth/session.js";
+import { createSessionMiddleware, setBrowserCookie } from "../src/auth/session.js";
 import { readConfig } from "../src/config.js";
 
 const oauth = {
@@ -39,12 +39,11 @@ test("guard independently enforces expiry and exposes only profile and expiry", 
   const expiresAt = time + 60_000;
   const sessions = new OAuthSessions({ ...oauth, async verify() { return { profile, expiresAt }; } }, () => time);
   const app = express();
-  app.use(createSessionMiddleware(config));
+  app.use(createSessionMiddleware(config, sessions));
   // Test-only login fixture; no expireIdentity middleware is installed.
   app.post("/fixture", (req, res) => {
-    sessions.add(req.sessionID, { profile, expiresAt, tokens: { accessToken: "private-access", scopes: [] } }, expiresAt);
-    req.session.oauthId = req.sessionID;
-    req.session.csrf = "private-csrf";
+    const created = sessions.create({ profile, expiresAt, tokens: { accessToken: "private-access", scopes: [] } }, expiresAt);
+    setBrowserCookie(res, config, created.key, expiresAt - time);
     res.sendStatus(204);
   });
   let handled = 0;
@@ -62,19 +61,12 @@ test("guard independently enforces expiry and exposes only profile and expiry", 
   assert.equal(handled, 1);
 });
 
-test("redirect mode sends unauthenticated requests to the fixed login route", async () => {
+test("anonymous guard requests return JSON without redirecting or accepting bearer tokens", async () => {
   const app = express();
-  app.use(createSessionMiddleware(config));
-  app.post("/fixture", (req, res) => {
-    req.session.pending = { state: "pending", verifier: "private", expiresAt: Date.now() + 60_000 };
-    res.sendStatus(204);
-  });
-  app.all("/protected", new RitaAuthGuard({ sessions: new OAuthSessions(oauth), unauthenticated: "redirect" }).handle,
-    (_req, res) => res.sendStatus(200));
-  const agent = request.agent(app);
-  await agent.post("/fixture").expect(204);
+  const sessions = new OAuthSessions(oauth);
+  app.use(createSessionMiddleware(config, sessions));
+  app.all("/protected", new RitaAuthGuard({ sessions }).handle, (_req, res) => res.sendStatus(200));
   for (const method of ["get", "post"] as const) {
-    await agent[method]("/protected?returnTo=https://untrusted.example")
-      .expect(303).expect("Location", "/auth/login");
+    await request(app)[method]("/protected?returnTo=https://untrusted.example").expect(401, { error: "not_authenticated" });
   }
 });

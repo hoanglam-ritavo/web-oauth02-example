@@ -1,3 +1,4 @@
+import { createHash, randomBytes } from 'node:crypto';
 import type { Authorization, Identity, OAuthClient, TokenSet } from "./oauth-client.js";
 import { AccessExpiredError, InvalidIdentityError, ProviderError } from "./oauth-client.js";
 
@@ -15,8 +16,11 @@ export interface SessionStatus {
   lastRefreshAt: number | null;
   verificationPending: boolean;
 }
-interface Entry {
-  identity: Identity;
+export interface LoginAttempt { state: string; verifier: string; expiresAt: number; active: boolean; claimed: boolean }
+export interface Entry {
+  csrf: string;
+  attempt?: LoginAttempt;
+  identity?: Identity;
   tokens: TokenSet;
   deadline: number;
   closing: boolean;
@@ -31,19 +35,43 @@ interface Entry {
   closeFlight?: Promise<boolean>;
   timer?: ReturnType<typeof setTimeout>;
 }
+type AuthEntry = Entry & { identity: Identity };
+export const keyHash = (key: string) => createHash("sha256").update(key).digest("hex");
 const unauthenticated = () => new SessionError("not_authenticated", 401);
 
-/** One process only. Express sessions hold references, never copies of these credentials. */
+/** One process only. The cookie references this store directly; no secondary session store. */
 export class OAuthSessions {
   private readonly entries = new Map<string, Entry>();
-  constructor(private readonly oauth: OAuthClient, private readonly now = Date.now) {}
+  constructor(private readonly oauth: OAuthClient, private readonly now = Date.now, private readonly capacity = 10_000) {}
 
-  add(id: string, authorization: Authorization, deadline: number) {
-    const effectiveDeadline = authorization.tokens.refreshToken
+  browser(id: string | undefined): Entry | undefined {
+    const entry = id ? this.entries.get(id) : undefined;
+    if (!entry || entry.closing) return undefined;
+    if (entry.deadline <= this.now()) { void this.close(id!); return undefined; }
+    return entry;
+  }
+
+  create(authorization?: Authorization, deadline = this.now() + 600_000, replacing?: string) {
+    if (this.entries.size >= this.capacity && !(replacing && this.browser(replacing))) {
+      throw new SessionError("store_full", 503, 5);
+    }
+    const key = randomBytes(32).toString("base64url");
+    const id = keyHash(key);
+    if (replacing) {
+      void this.close(replacing);
+      this.entries.delete(replacing);
+    }
+    const effectiveDeadline = this.add(id, authorization, deadline);
+    return { key, id, deadline: effectiveDeadline };
+  }
+
+  add(id: string, authorization: Authorization | undefined, deadline: number) {
+    const effectiveDeadline = !authorization || authorization.tokens.refreshToken
       ? deadline : Math.min(deadline, authorization.expiresAt);
     const entry: Entry = {
-      identity: { profile: authorization.profile, expiresAt: authorization.expiresAt },
-      tokens: authorization.tokens, deadline: effectiveDeadline, closing: false,
+      csrf: randomBytes(32).toString("base64url"),
+      identity: authorization ? { profile: authorization.profile, expiresAt: authorization.expiresAt } : undefined,
+      tokens: authorization?.tokens ?? { accessToken: "", scopes: [] }, deadline: effectiveDeadline, closing: false,
       pending: false, version: 0, retryAt: 0, refreshCount: 0, lastRefreshAt: null,
     };
     this.entries.set(id, entry);
@@ -60,7 +88,8 @@ export class OAuthSessions {
       await this.close(id);
       throw unauthenticated();
     }
-    return entry;
+    if (!entry.identity) throw unauthenticated();
+    return entry as AuthEntry;
   }
 
   async status(id: string): Promise<SessionStatus> {
@@ -68,7 +97,7 @@ export class OAuthSessions {
     if (e.failure) throw e.failure;
     return this.snapshot(e);
   }
-  private snapshot(e: Entry): SessionStatus {
+  private snapshot(e: AuthEntry): SessionStatus {
     return {
       accessExpiresAt: e.identity.expiresAt, sessionExpiresAt: e.deadline,
       canRefresh: Boolean(e.tokens.refreshToken), scopes: [...e.tokens.scopes],
@@ -154,7 +183,7 @@ export class OAuthSessions {
     return { profile: e.identity.profile, expiresAt: e.identity.expiresAt };
   }
 
-  private async update(e: Entry) {
+  private async update(e: AuthEntry) {
     if (!e.pending) {
       try {
         // Commit replacement credentials BEFORE any JWT/userinfo await.
@@ -215,6 +244,7 @@ export class OAuthSessions {
     if (!e) return Promise.resolve(true);
     if (e.closeFlight) return e.closeFlight;
     e.closing = true;
+    if (e.attempt) e.attempt.active = false;
     clearTimeout(e.timer);
     e.closeFlight = (async () => {
       await e.flight?.catch(() => undefined);

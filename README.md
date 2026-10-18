@@ -1,113 +1,99 @@
-# Rita OAuth Example
+# Rita OAuth SPA Example
 
-**Express + TypeScript + EJS + Axios** minh họa OAuth 2.0 với Rita Võ ID cho hệ thống có backend
-riêng (confidential client). Token ở backend, browser giữ cookie session ID, guard xác thực
-và lấy profile trước handler private. Không có database user riêng.
+Static HTML + JavaScript + Axios SPA, served by Express/TypeScript on the same origin.
+The example is a confidential OAuth client. Rita ID issues the OAuth tokens; the example backend keeps them in RAM.
+The browser only holds an opaque HttpOnly cookie. There is no EJS or express-session dependency.
 
-> **Lưu trữ production:** In-memory store hiện tại chỉ dành cho demo. Khi triển khai thực tế,
-> cần lưu cặp token và dữ liệu phiên liên quan trong kho độc lập với process ứng dụng, như Redis
-> được cấu hình persistence phù hợp hoặc PostgreSQL với lưu trữ bền vững, để phiên không mất
-> chỉ vì ứng dụng restart, redeploy hoặc downtime. Chỉ lưu token là chưa đủ; xem
-> [yêu cầu lưu trữ bền vững](ARCHITECTURE.md#luu-tru-ben-vung).
+## Architecture
 
-## Tài liệu
+`Browser cookie -> SHA-256 key lookup -> RAM entry -> OAuth access/refresh tokens`
 
-| Tài liệu | Nội dung |
-| --- | --- |
-| [Kiến trúc](ARCHITECTURE.md) | Thành phần, ba lớp dữ liệu phiên, middleware và giới hạn vận hành |
-| [1. Login và guard](docs/flows/01-login-and-guard.md) | Callback, lưu token, cookie và cách gắn guard |
-| [2. Request private API](docs/flows/02-private-resource-request.md) | Axios → session → userinfo → handler |
-| [3. Refresh và kết thúc phiên](docs/flows/03-refresh-and-session-termination.md) | Rotation, refetch profile, concurrency, lỗi và logout |
+The cookie is `rita_example.key`, a random 32-byte base64url value, not an OAuth token.
+The entry contains CSRF, deadlines, pending state/PKCE, credentials and concurrency state.
+See [architecture](ARCHITECTURE.md), [login](docs/flows/01-login-and-guard.md),
+[private APIs](docs/flows/02-private-resource-request.md), [refresh/logout](docs/flows/03-refresh-and-session-termination.md)
+and the [test matrix](docs/TEST-MATRIX.md).
 
-## Luồng tổng quan
+**Demo only:** one process, RAM store, production startup disabled. Restart loses sessions.
+There is no cross-instance refresh lock or persistence. Logging out here does not log out of Rita ID SSO.
 
-1. Browser đăng nhập Rita ID bằng Authorization Code + PKCE S256.
-2. Backend đổi code, xác minh JWT/profile, tạo session ID mới và lưu token trong RAM.
-3. Browser nhận cookie HttpOnly `rita_example.sid`; EJS render trang, Axios gọi API cùng origin.
-4. Guard tra phiên, xác minh access token và gọi userinfo, gắn `req.auth` trước khi chạy handler.
-5. Token hết hạn được refresh ở backend; cập nhật cùng phiên, lấy lại profile, tiếp tục request.
-6. Logout xóa phiên/cookie ứng dụng và thử revoke tại Rita ID; không logout SSO Rita ID.
+## Local setup
 
-Axios frontend **không refresh trong interceptor, không tự replay request**. Khi nhận
-`401 not_authenticated`, nó xóa UI và chuyển về `/`. Lỗi 403/502/503 hoặc lỗi mạng được hiển thị,
-không tự logout. Không trả OAuth token/client secret xuống browser.
-
-## Chạy local
-
-Yêu cầu Node.js 24, npm, Rita ID backend và developer portal hoạt động. Tạo confidential client
-trên portal, đăng ký callback chính xác **http://localhost:3003/auth/callback**, không slash cuối.
-Chỉ chạy một process; `NODE_ENV=production` bị chặn vì dùng RAM.
+Use Node.js 24 and npm. Register a confidential client in the developer portal with authorization_code and refresh_token grants,
+scopes `openid profile email`, and exact callback `http://localhost:3003/auth/callback`.
+Upgrade the Rita ID backend with token-purpose enforcement before running this example.
 
 ```powershell
 npm ci
-# Chỉ copy nếu chưa có .env, không ghi đè cấu hình hiện tại.
+# Only copy if .env does not already exist.
 Copy-Item .env.example .env
-node -e "console.log(require('node:crypto').randomBytes(32).toString('hex'))"
 npm run dev
 ```
 
-Điền client ID, client secret, SESSION_SECRET ngẫu nhiên vào `.env`; không commit secret.
-Mở **http://localhost:3003**. Không trộn localhost và 127.0.0.1 trong cùng phiên.
+Configure the client ID/secret in your local .env; never commit real credentials.
+Open http://localhost:3003. Do not mix localhost with 127.0.0.1 during a login.
 
-| Biến | Mặc định / yêu cầu |
+| Variable | Default / requirement |
 | --- | --- |
-| NODE_ENV | development/test; production bị chặn |
+| NODE_ENV | development/test; production rejected |
 | PORT | 3003 |
-| APP_BASE_URL | http://localhost:3003 |
-| RITA_PORTAL_URL | http://localhost:3000 |
-| RITA_API_URL | http://localhost:3000/api; cho phép path prefix |
-| RITA_CLIENT_ID | Bắt buộc, confidential client |
-| RITA_CLIENT_SECRET | Bắt buộc, chỉ phía server |
-| SESSION_SECRET | Bắt buộc, tối thiểu 32 ký tự |
-| SESSION_MAX_AGE_HOURS | 8; lớn hơn 0, tối đa 24 |
+| APP_BASE_URL | http://localhost:3003; origin only |
+| RITA_PORTAL_URL | http://localhost:3000; origin only |
+| RITA_API_URL | http://localhost:3000/api; optional path prefix |
+| RITA_CLIENT_ID | Required confidential client ID |
+| RITA_CLIENT_SECRET | Required, server-only |
+| SESSION_MAX_AGE_HOURS | 8; greater than 0 and at most 24 |
+| MAX_SESSION_ENTRIES | 10000; positive safe integer |
 
-`RITA_API_URL=http://localhost:3000/api` đi qua rewrite portal; `http://localhost:4000` gọi trực
-tiếp backend. APP_BASE_URL và RITA_PORTAL_URL chỉ nhận origin. Đổi port phải đồng bộ callback.
-Ứng dụng listen 127.0.0.1; HTTPS local cần reverse proxy loopback và X-Forwarded-Proto.
-Cookie HttpOnly, SameSite=Lax, Path=/, không Domain; Secure khi APP_BASE_URL là HTTPS.
-Token/userinfo/revoke là server-to-server, không cần thêm origin ứng dụng vào CORS Rita ID
-cho các request này. OAuth refresh dùng `/auth/oauth/token`, khác `/auth/refresh` của SSO Rita ID.
+SESSION_SECRET is obsolete and ignored. Legacy `rita_example.sid` cookies are cleared; old sessions are not migrated.
+`RITA_API_URL=http://localhost:4000` calls Rita ID directly; the default uses the portal /api rewrite.
+Server-to-server OAuth requests do not need browser CORS. The server listens on loopback;
+HTTPS requires a loopback reverse proxy with X-Forwarded-Proto. Secure cookies follow APP_BASE_URL.
 
-## API
+## HTTP contract
 
-| Method | Path | Hành vi |
+| Method | Path | Behavior |
 | --- | --- | --- |
-| GET | / | EJS shell và metadata; browser tải profile bằng Axios |
-| GET | /auth/login | Redirect portal với state/PKCE |
-| GET | /auth/callback | Đổi code, tạo phiên, redirect / |
-| GET | /api/me | Guard + profile mới từ Rita ID |
-| GET | /api/private/example | Guard + `{ message, subject }` |
-| GET | /api/session | Metadata phiên; không refresh hoặc gọi userinfo |
-| POST | /auth/refresh | CSRF; refresh thủ công |
-| POST | /auth/logout | CSRF; revoke, xóa phiên và cookie |
-| GET | /health | `{ status: "ok" }`, không gọi Rita ID |
+| GET | / and extensionless navigation paths | Static SPA shell, no embedded identity/CSRF |
+| GET | /api/session | 200 `{ authenticated, csrf, session }`; creates anonymous entry when needed |
+| GET | /auth/login | Bind one state/PKCE attempt and redirect to portal |
+| GET | /auth/callback | Consume attempt, exchange/verify, rotate cookie, redirect to `/?auth=<safe-code>` |
+| GET | /api/me | Guard and fresh userinfo profile |
+| GET | /api/private/example | Guard and `{ message, subject }` |
+| POST | /auth/refresh | `{ csrf }` -> `{ profile, session }` |
+| POST | /auth/logout | `{ csrf }` -> `{ loggedOut: true, revokeConfirmed }` |
+| GET | /health | `{ status: "ok" }`; no provider call |
 
-Axios gửi `Accept: application/json` và body `{ csrf }` khi refresh/logout.
-Refresh trả `{ profile, session }`; logout trả `{ loggedOut: true, revokeConfirmed }`.
-Form truyền thống nhận URL-encoded body và redirect 303. API lỗi trả `{ error }`.
-Callback JSON tùy chọn trả `{ profile, expiresAt }`, vẫn yêu cầu login attempt hợp lệ.
-Chi tiết lỗi: [refresh/logout](docs/flows/03-refresh-and-session-termination.md).
+Session metadata contains expiry times, canRefresh, scopes, refreshCount, lastRefreshAt and verificationPending.
+Bootstrap is local metadata, not proof of current provider authorization. Every protected handler uses the guard.
+JSON API errors are `{ error }`: 400 invalid body; 401 not_authenticated; 403 forbidden/invalid_csrf/invalid_origin;
+409 refresh_unavailable; 413 body_too_large; 502 integration_error; 503 temporarily_unavailable/store_full with Retry-After.
+Unknown API/auth/assets return 404, never SPA HTML. Auth/private/bootstrap responses use no-store.
+Refresh/logout accept JSON or URL-encoded bodies but always return JSON; old form redirect behavior is removed.
+An injected JSON callback mode is retained for isolated integration tests; the running server uses redirects.
 
-## Kiểm chứng
+The SPA keeps CSRF only in memory, never reads the HttpOnly cookie and never replays a POST automatically.
+401 clears private UI without redirect loops. Transient, network, 403 and configuration errors remain visible.
+BroadcastChannel carries only a change signal; foreground/BFCache/online events re-bootstrap the session.
+
+## Verification and rollout
 
 ```powershell
+npm run lint
 npm run typecheck
 npm test
-npm run build
-npm start
-# Provider giả lập và Chrome headless, không đọc .env:
 npm run test:browser
+npm start
 ```
 
-Build copy EJS, CSS, JavaScript và Axios browser bundle vào `dist`; đường dẫn dựa trên module.
-Browser smoke dùng Chrome tại đường dẫn Windows mặc định, có thể đặt `CHROME_PATH`; script in
-đường dẫn profile Chrome tạm để dọn sau kiểm thử. Asset phục vụ cùng origin, không CDN.
+Browser tests build first and run Chrome headless against a fictional HTTP provider, without loading .env.
+Set CHROME_PATH if Chrome is not at its default Windows path. The script prints its temporary profile path.
+Build serves only static public assets and the bundled Axios script; it does not depend on the working directory.
 
-**Kết quả đã ghi nhận ngày 2026-10-17:** typecheck, 69/69 tests, build và Chrome smoke pass.
-Đây là kết quả của lần triển khai trước, không phải lần chạy mới khi cập nhật tài liệu.
-Tests dùng fixtures/HTTP provider giả lập và RSA/JWKS; chưa kiểm thử live backend/HRM hoặc TLS proxy.
-Kết quả giả lập không chứng minh concurrency PostgreSQL phía Rita ID.
+Upgrade backend first, then portal if required, then restart this example. Access tokens missing `token_use` are rejected;
+valid Rita ID refresh tokens can obtain new-purpose tokens, otherwise users sign in again.
+Deploying this example invalidates the old RAM sessions and cookie format. Do not roll back to an unsafe token boundary.
 
-Kiểm thử live riêng với tài khoản/client test: login/consent, refresh, logout và lỗi HRM có kiểm soát.
-Không replay refresh token thật trên hệ thống dùng chung. Hạn chế revoke/userinfo và kho RAM
-được giải thích trong [kiến trúc](ARCHITECTURE.md).
+Current verification on 2026-10-18 is recorded in [the test matrix](docs/TEST-MATRIX.md).
+Historical pre-SPA baseline on 2026-10-17: 69 tests, typecheck, build and Chrome smoke passed with a fictional provider.
+Neither that baseline nor current isolated tests establishes live HRM, deployment TLS, or full three-repository browser compatibility.
