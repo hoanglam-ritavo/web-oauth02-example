@@ -1,3 +1,4 @@
+import { profileFields } from "./profile-fixture.js";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
@@ -15,7 +16,7 @@ const unusedOAuth = {
   async revoke() {},
 };
 const sub = "12345678-1234-4123-8123-123456789012";
-const profile = { sub, name: "Demo", email: "demo@example.com", employee_id: null, phone_number: null, is_developer: false, groups: "EMPLOYEE" as const };
+const profile = { sub, name: "Demo", email: "demo@example.com", employee_id: null, phone_number: null, ...profileFields(), is_developer: false, groups: "EMPLOYEE" as const };
 
 test("static SPA shell and same-origin assets use CSP", async () => {
   const app = createApp(config);

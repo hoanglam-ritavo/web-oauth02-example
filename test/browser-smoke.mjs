@@ -45,7 +45,11 @@ host.get('/provider/auth/oauth/userinfo', async (_req, res) => {
   userinfos++;
   if (userinfoStatus !== 200) { res.sendStatus(userinfoStatus); return; }
   res.json({ _id: subject, name: '<img src=x onerror="window.injected=true">', email: 'fixture@example.com',
-    employee_id: null, phone_number: null, groups: 'EMPLOYEE', is_developer: false });
+    employee_id: null, phone_number: null, groups: 'EMPLOYEE', is_developer: false,
+    avatar: null, position: { text: null, parser: {
+      group: '', company: '', department: '', board: '', region: '', store: '',
+      warehouse: '', factory: '', workshop: '', showroom: '', center: '', cafe: '', others: [],
+    } } });
 });
 host.post('/provider/auth/oauth/revoke', (_req, res) => res.sendStatus(200));
 const server = host.listen(0, '127.0.0.1');

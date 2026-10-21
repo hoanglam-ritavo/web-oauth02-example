@@ -1,3 +1,5 @@
+import { profileFields } from "./profile-fixture.js";
+import { InvalidIdentityError } from "../src/auth/oauth-client.js";
 import request from "supertest";
 import { createServer } from "node:http";
 import { once } from "node:events";
@@ -21,7 +23,7 @@ async function token(options: { isClient?: boolean; alg?: string; noAud?: boolea
   if (!options.noExp) signer.setExpirationTime(options.exp ?? now + 300);
   return signer.sign(options.alg === "HS256" ? new TextEncoder().encode("test-only-secret-at-least-32-characters") : options.wrongKey ? otherKeys.privateKey : keys.privateKey);
 }
-const userinfo = { _id: subject, name: "Demo", email: "demo@example.com", employee_id: null, phone_number: null, is_developer: false, groups: "EMPLOYEE" };
+const userinfo = { _id: subject, name: "Demo", email: "demo@example.com", employee_id: null, phone_number: null, ...profileFields(), is_developer: false, groups: "EMPLOYEE" };
 function mockFetch(accessToken: string, profile: unknown = userinfo) {
   const calls: { url: string; init: RequestInit }[] = [];
   const fetcher: typeof fetch = async (input, init = {}) => {
@@ -38,7 +40,7 @@ test("exchanges exact JSON contract then verifies RSA/JWKS and matches userinfo 
   const { fetcher, calls } = mockFetch(accessToken, { ...userinfo, arbitrary: "not persisted" });
   const client = createOAuthClient(config, { fetch: fetcher, key, now: () => now * 1000 });
   const result = await client.exchange("code", "verifier");
-  assert.deepEqual(result, { tokens: { accessToken, refreshToken: "discard-refresh", scopes: [] }, profile: { sub: subject, name: userinfo.name, email: userinfo.email, employee_id: null, phone_number: null, is_developer: false, groups: "EMPLOYEE" }, expiresAt: (now + 300) * 1000 });
+  assert.deepEqual(result, { tokens: { accessToken, refreshToken: "discard-refresh", scopes: [] }, profile: { sub: subject, name: userinfo.name, email: userinfo.email, employee_id: null, phone_number: null, ...profileFields(), is_developer: false, groups: "EMPLOYEE" }, expiresAt: (now + 300) * 1000 });
   assert.equal(calls.length, 2);
   assert.equal(calls[0]!.url, config.apiUrl + "/auth/oauth/token");
   assert.deepEqual(JSON.parse(String(calls[0]!.init.body)), {
@@ -117,11 +119,13 @@ for (const [label, options] of Object.entries({
 test("rejects mismatched userinfo subject and malformed profile", async () => {
   for (const profile of [null, { ...userinfo, _id: "other" }, { sub: subject },
     ...Object.keys(userinfo).map(field => ({ ...userinfo, [field]: undefined })),
-    ...["name", "email", "employee_id", "phone_number", "is_developer", "groups"].map(field => ({ ...userinfo, [field]: 42 })),
+    ...["name", "email", "employee_id", "phone_number", "is_developer", "groups", "avatar", "position"].map(field => ({ ...userinfo, [field]: 42 })),
+    { ...userinfo, position: { ...userinfo.position, parser: { ...userinfo.position.parser, others: [42] } } },
+    { ...userinfo, position: { ...userinfo.position, text: false } },
     { ...userinfo, groups: "DEVELOPER" }, { ...userinfo, is_developer: "false" },
     { ...userinfo, _id: undefined, sub: subject }]) {
     const { fetcher } = mockFetch(await token(), profile);
-    await assert.rejects(createOAuthClient(config, { fetch: fetcher, key }).exchange("code", "verifier"));
+    await assert.rejects(createOAuthClient(config, { fetch: fetcher, key }).exchange("code", "verifier"), InvalidIdentityError);
   }
 });
 for (const endpoint of ["token", "userinfo"]) {

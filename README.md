@@ -72,6 +72,20 @@ Unknown API/auth/assets return 404, never SPA HTML. Auth/private/bootstrap respo
 Refresh/logout accept JSON or URL-encoded bodies but always return JSON; old form redirect behavior is removed.
 An injected JSON callback mode is retained for isolated integration tests; the running server uses redirects.
 
+The example requires the current Rita ID `/auth/oauth/userinfo` contract: all nine fields
+`_id`, `name`, `email`, `employee_id`, `phone_number`, `is_developer`, `groups`, `avatar` and `position`
+must be present. `_id` must match the verified JWT subject and is exposed as `sub`.
+`avatar`, `employee_id` and `phone_number` are strings or null.
+`position` contains `text` (string or null) and `parser`, with string categories
+`group`, `company`, `department`, `board`, `region`, `store`, `warehouse`, `factory`,
+`workshop`, `showroom`, `center`, `cafe`, plus `others` (an array of strings).
+Empty categories are empty strings; an unavailable position uses null text and an empty parser.
+The example preserves these values without reparsing text, strips unknown fields at every level,
+and rejects missing or mistyped fields rather than filling defaults for older backend versions.
+OAuth profiles accept `EMPLOYEE`, `CUSTOMER` and `ENTERPRISE`; `DEVELOPER` is excluded by the
+backend OAuth eligibility policy. `/api/me`, refresh and JSON callback responses include the
+new profile fields. Provider 503 responses remain temporary failures, not empty profiles.
+
 The SPA keeps CSRF only in memory, never reads the HttpOnly cookie and never replays a POST automatically.
 401 clears private UI without redirect loops. Transient, network, 403 and configuration errors remain visible.
 BroadcastChannel carries only a change signal; foreground/BFCache/online events re-bootstrap the session.

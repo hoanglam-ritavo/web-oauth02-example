@@ -1,3 +1,4 @@
+import { profileFields } from "./profile-fixture.js";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import request from "supertest";
@@ -6,7 +7,7 @@ import { readConfig } from "../src/config.js";
 import { OAuthSessions, keyHash } from "../src/auth/oauth-sessions.js";
 import { setTimeout as delay } from "node:timers/promises";
 const config = readConfig({ RITA_CLIENT_ID: "client", RITA_CLIENT_SECRET: "secret" });
-const profile = { sub: "12345678-1234-4123-8123-123456789012", name: "Test", email: "test@example.invalid", employee_id: null, phone_number: null, is_developer: false, groups: "EMPLOYEE" as const };
+const profile = { sub: "12345678-1234-4123-8123-123456789012", name: "Test", email: "test@example.invalid", employee_id: null, phone_number: null, ...profileFields(), is_developer: false, groups: "EMPLOYEE" as const };
 const authorization = () => ({ profile, expiresAt: Date.now() + 300_000, tokens: { accessToken: "private-access", refreshToken: "private-refresh", scopes: [] } });
 const oauth = { exchange: async () => authorization(), verify: async () => authorization(), refresh: async () => authorization().tokens, revoke: async () => {} };
 const cookie = (res: request.Response) => String(res.headers["set-cookie"]).split(";")[0]!;
