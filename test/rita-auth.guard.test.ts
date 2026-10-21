@@ -1,3 +1,4 @@
+import { profileFields } from "./profile-fixture.js";
 import { OAuthSessions } from "../src/auth/oauth-sessions.js";
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -20,7 +21,7 @@ const config = readConfig({
 const profile = {
   sub: "12345678-1234-4123-8123-123456789012", name: "Demo",
   email: "demo@example.com", employee_id: null, phone_number: null,
-  is_developer: false, groups: "EMPLOYEE" as const,
+  ...profileFields(), is_developer: false, groups: "EMPLOYEE" as const,
 };
 
 test("guard rejects missing session even with a bearer header or stale request auth", async () => {

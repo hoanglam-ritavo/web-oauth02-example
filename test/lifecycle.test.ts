@@ -1,3 +1,4 @@
+import { profileFields } from "./profile-fixture.js";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { setTimeout as delay } from "node:timers/promises";
@@ -81,7 +82,7 @@ function fixture(options: { refresh?: boolean; lifetime?: number } = {}) {
     return Response.json({
       _id: state.subject, name: state.name, email: "fixture-private@example.com",
       employee_id: "fixture-employee", phone_number: "fixture-private-phone",
-      is_developer: false, groups: "EMPLOYEE",
+      ...profileFields(), is_developer: false, groups: "EMPLOYEE",
     });
   };
   const oauth = createOAuthClient(config, { fetch: fetcher, key, now: () => time });
@@ -127,6 +128,8 @@ test("every private request fetches fresh profile without early rotation or cook
   f.advance(280_000);
   const response = await f.agent.get("/api/me").expect(200);
   assert.equal(response.body.name, "New profile");
+  assert.equal(response.body.avatar, profileFields().avatar);
+  assert.deepEqual(response.body.position, profileFields().position);
   assert.equal(response.headers["set-cookie"], undefined);
   assert.equal(f.state.userinfos, initial + 2);
   assert.equal(f.state.refreshes, 0);
@@ -140,6 +143,8 @@ test("JSON refresh and logout retain the cookie until logout, require CSRF and e
   await f.agent.post("/auth/refresh").set("Accept", "application/json").send({}).expect(403);
   const refreshed = await f.agent.post("/auth/refresh").set("Accept", "application/json").send({ csrf }).expect(200);
   assert.equal(refreshed.body.profile.sub, subject);
+  assert.equal(refreshed.body.profile.avatar, profileFields().avatar);
+  assert.deepEqual(refreshed.body.profile.position, profileFields().position);
   assert.equal(refreshed.body.session.refreshCount, 1);
   assert.equal(refreshed.headers["set-cookie"], undefined);
   for (const token of f.state.issued) assert.ok(!JSON.stringify(refreshed.body).includes(token));
@@ -472,7 +477,7 @@ test("idle expiry cleanup revokes without a browser request", async () => {
     async revoke(token) { assert.equal(token, "idle-refresh"); revoked.resolve(); },
   });
   sessions.add("idle-id", {
-    profile: { sub: subject, name: "Demo", email: "", employee_id: null, phone_number: null, is_developer: false, groups: "EMPLOYEE" },
+    profile: { sub: subject, name: "Demo", email: "", employee_id: null, phone_number: null, ...profileFields(), is_developer: false, groups: "EMPLOYEE" },
     expiresAt: Date.now() + 300_000,
     tokens: { accessToken: "idle-access", refreshToken: "idle-refresh", scopes: [] },
   }, Date.now() + 25);

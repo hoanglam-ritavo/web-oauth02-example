@@ -1,3 +1,4 @@
+import { profileFields } from "./profile-fixture.js";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
@@ -10,7 +11,7 @@ const config = readConfig({ RITA_CLIENT_ID: "client", RITA_CLIENT_SECRET: "secre
 const subject = "12345678-1234-4123-8123-123456789012";
 const keys = await generateKeyPair("RS256");
 const jwks = { keys: [{ ...await exportJWK(keys.publicKey), kid: "key", alg: "RS256" }] };
-const profile = { sub: subject, name: "Test", email: "", employee_id: null, phone_number: null, is_developer: false, groups: "EMPLOYEE" as const };
+const profile = { sub: subject, name: "Test", email: "", employee_id: null, phone_number: null, ...profileFields(), is_developer: false, groups: "EMPLOYEE" as const };
 for (const mode of ["503", "429", "json", "schema", "timeout"]) {
   test(`JWKS ${mode} preserves credentials and recovers without refresh or revoke`, async t => {
     let broken = true, calls = 0, revoked = 0, refreshes = 0;
