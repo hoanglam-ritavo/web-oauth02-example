@@ -1,6 +1,6 @@
 # Refresh and session termination
 
-[README](../../README.md) | [Architecture](../../ARCHITECTURE.md)
+[README](../../../README.md) | [Architecture](../../../ARCHITECTURE.md)
 
 Refresh uses /auth/oauth/token with the refresh_token grant and client authentication; it never uses Rita ID's SSO /auth/refresh.
 Manual refresh requires matching CSRF and, when supplied, a matching Origin. No refresh token produces 409.
@@ -22,3 +22,11 @@ Local data is removed even if revoke fails; JSON distinguishes revokeConfirmed=f
 still require CSRF. Late private responses cannot restore frontend state. Login changes and logout are signaled to other tabs without credentials.
 
 Neither app logout nor OAuth revoke logs out Rita ID SSO. Issued access JWTs may remain valid until expiry. Restart loses RAM and cannot guarantee revoke.
+
+## Participants and prerequisites
+
+Browser SPA, example backend and Rita ID participate in this flow. Enable web or both mode and configure the confidential client and exact callback using the [deployment guide](../../deployment.md). Protected resources require an authenticated cookie entry; refresh/logout also enforce their documented CSRF rules.
+
+## Implementation and evidence
+
+See [implementation](../../../src/auth/oauth-sessions.ts), [flow regression](../../../test/lifecycle.test.ts), [cookie/SPA tests](../../../test/cookie-spa.test.ts) and [Chrome smoke](../../../test/browser-smoke.mjs). These use fictional providers; [current verification](../../TEST-MATRIX.md#current-verification-status) distinguishes executed checks from live acceptance.

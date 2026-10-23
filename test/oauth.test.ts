@@ -8,7 +8,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { generateKeyPair, SignJWT, createLocalJWKSet, exportJWK } from "jose";
 import { createOAuthClient } from "./provider-fixture.js";
-import { readConfig } from "../src/config.js";
+import { readWebConfig as readConfig } from "./web-config.js";
 
 const config = readConfig({ RITA_CLIENT_ID: "client", RITA_CLIENT_SECRET: "secret", SESSION_SECRET: "x".repeat(32) });
 const subject = "12345678-1234-4123-8123-123456789012";

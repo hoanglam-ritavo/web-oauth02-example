@@ -1,13 +1,12 @@
 import { Router } from "express";
-import type { Config } from "../config.js";
+import type { WebConfig } from "../config.js";
 import { ensureBrowser } from "../auth/session.js";
 import { RitaAuthGuard } from "../auth/rita-auth.guard.js";
 import { OAuthSessions } from "../auth/oauth-sessions.js";
 
-export function createPublicRouter(sessions: OAuthSessions, config: Config, now: () => number) {
+export function createPublicRouter(sessions: OAuthSessions, config: WebConfig, now: () => number) {
   const router = Router();
   const auth = new RitaAuthGuard({ sessions });
-  router.get("/health", (_req, res) => res.json({ status: "ok" }));
   router.get("/api/me", auth.handle, (req, res) => res.json(req.auth!.profile));
   router.get("/api/private/example", auth.handle, (req, res) =>
     res.json({ message: "Private resource accessed.", subject: req.auth!.profile.sub }));

@@ -15,7 +15,7 @@ const chromePath = process.env.CHROME_PATH ?? 'C:/Program Files/Google/Chrome/Ap
 const directory = await mkdtemp(join(tmpdir(), 'rita-example-browser-'));
 const keys = await generateKeyPair('RS256');
 const subject = '12345678-1234-4123-8123-123456789012';
-const config = readConfig({ RITA_CLIENT_ID: 'browser-client', RITA_CLIENT_SECRET: 'browser-secret', SESSION_SECRET: 's'.repeat(40) });
+const config = readConfig({ EXAMPLE_MODE: process.env.SMOKE_EXAMPLE_MODE ?? 'web', RITA_MOBILE_CLIENT_ID: 'mobile-client', RITA_CLIENT_ID: 'browser-client', RITA_CLIENT_SECRET: 'browser-secret', SESSION_SECRET: 's'.repeat(40) });
 let now = Math.floor(Date.now() / 1000) * 1000;
 let refreshes = 0, issued = 0, currentRefresh = '', userinfos = 0, userinfoStatus = 200;
 const secrets = [];

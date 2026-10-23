@@ -1,5 +1,5 @@
 import type { RequestHandler } from "express";
-import type { Config } from "../config.js";
+import type { WebConfig } from "../config.js";
 import { ProviderError, type OAuthClient, type Authorization } from "./oauth-client.js";
 import { OAuthSessions } from "./oauth-sessions.js";
 import { random, same, pkceChallenge } from "./security.js";
@@ -9,7 +9,7 @@ export class RitaAuthError extends Error {
   constructor(readonly code: string, readonly status: number) { super(code); }
 }
 export interface RitaAuthStrategyOptions {
-  config: Config; oauth: OAuthClient; sessions: OAuthSessions; now: () => number;
+  config: WebConfig; oauth: OAuthClient; sessions: OAuthSessions; now: () => number;
 }
 export class RitaAuthStrategy {
   constructor(private readonly options: RitaAuthStrategyOptions) {}

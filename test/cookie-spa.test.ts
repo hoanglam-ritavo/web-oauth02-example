@@ -3,7 +3,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import request from "supertest";
 import { createApp } from "../src/app.js";
-import { readConfig } from "../src/config.js";
+import { readWebConfig as readConfig } from "./web-config.js";
 import { OAuthSessions, keyHash } from "../src/auth/oauth-sessions.js";
 import { setTimeout as delay } from "node:timers/promises";
 const config = readConfig({ RITA_CLIENT_ID: "client", RITA_CLIENT_SECRET: "secret" });

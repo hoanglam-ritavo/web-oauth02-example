@@ -7,6 +7,10 @@ import { parseProfile, validSubject, type Profile } from "./profile.js";
 export interface Identity { profile: Profile; expiresAt: number }
 export interface TokenSet { accessToken: string; refreshToken?: string; scopes: string[] }
 export interface Authorization extends Identity { tokens: TokenSet }
+export interface VerifiedProof extends Identity { scopes: string[] }
+export interface MobileOAuthClient extends OAuthClient {
+  proof(tokens: TokenSet, expectedSubject?: string): Promise<VerifiedProof>;
+}
 export interface OAuthClient {
   exchange(code: string, verifier: string): Promise<Authorization>;
   refresh(refreshToken: string): Promise<TokenSet>;
@@ -27,7 +31,11 @@ const record = (v: unknown): v is Record<string, unknown> =>
 
 export function createOAuthClient(config: Config, options: {
   adapter?: AxiosAdapter; key?: JWTVerifyGetKey; now?: () => number; timeoutMs?: number;
-} = {}): OAuthClient {
+  publicClientId?: string;
+} = {}): MobileOAuthClient {
+  const publicClientId = options.publicClientId ?? (config.mode === 'mobile' ? config.mobile.clientId : undefined);
+  const clientId = publicClientId ?? (config.mode !== 'mobile' ? config.clientId : '');
+  const clientSecret = config.mode !== 'mobile' ? config.clientSecret : undefined;
   const now = options.now ?? Date.now;
   const timeoutMs = options.timeoutMs ?? 10_000;
   const http = axios.create({ timeout: timeoutMs, maxRedirects: 0,
@@ -58,7 +66,8 @@ export function createOAuthClient(config: Config, options: {
   }
   const post = (path: string, body: Record<string, string>) => send(path, {
     method: "POST", headers: { "Content-Type": "application/json", Accept: "application/json" },
-    body: JSON.stringify({ ...body, client_id: config.clientId, client_secret: config.clientSecret }),
+    body: JSON.stringify({ ...body, client_id: clientId,
+      ...(publicClientId ? {} : { client_secret: clientSecret }) }),
   });
   async function token(body: Record<string, string>, rotating = false): Promise<TokenSet> {
     const data: unknown = await (await post("/auth/oauth/token", body)).json();
@@ -74,7 +83,7 @@ export function createOAuthClient(config: Config, options: {
       scopes: typeof data.scope === "string" ? [...new Set(data.scope.split(" ").filter(Boolean))] : [],
     };
   }
-  async function verify(tokens: TokenSet, expectedSubject?: string): Promise<Identity> {
+  async function proof(tokens: TokenSet, expectedSubject?: string): Promise<VerifiedProof> {
     // Token purpose is mandatory; Rita ID still does not provide a complete OIDC issuer contract.
     let payload;
     try {
@@ -82,7 +91,7 @@ export function createOAuthClient(config: Config, options: {
         if (typeof header.kid !== "string" || !header.kid) throw new InvalidIdentityError();
         return key(header, token);
       }, {
-        algorithms: ["RS256"], audience: config.clientId,
+        algorithms: ["RS256"], audience: clientId,
         requiredClaims: ["sub", "aud", "exp", "token_use"], currentDate: new Date(now()),
       }));
     } catch (error) {
@@ -116,15 +125,22 @@ export function createOAuthClient(config: Config, options: {
     try {
       const profile = parseProfile(data, payload.sub);
       if (payload.exp * 1000 <= now()) throw new InvalidIdentityError();
-      return { profile, expiresAt: payload.exp * 1000 };
+      if (publicClientId && typeof payload.scope !== "string") throw new InvalidIdentityError();
+      return { profile, expiresAt: payload.exp * 1000,
+        scopes: typeof payload.scope === "string" ? [...new Set<string>((payload.scope as string).split(" ").filter(Boolean))].sort() : [] };
     } catch { throw new InvalidIdentityError(); }
   }
   async function revoke(refreshToken: string) {
     // The endpoint has an empty successful body.
     await post("/auth/oauth/revoke", { token: refreshToken });
   }
+  async function verify(tokens: TokenSet, expectedSubject?: string): Promise<Identity> {
+    const { profile, expiresAt } = await proof(tokens, expectedSubject);
+    return { profile, expiresAt };
+  }
   return {
     async exchange(code, verifier) {
+      if (config.mode === 'mobile') throw new Error('Code exchange is not available in mobile mode.');
       const tokens = await token({
         grant_type: "authorization_code", redirect_uri: config.callbackUrl,
         code, code_verifier: verifier,
@@ -136,6 +152,6 @@ export function createOAuthClient(config: Config, options: {
       }
     },
     refresh: refreshToken => token({ grant_type: "refresh_token", refresh_token: refreshToken }, true),
-    verify, revoke,
+    verify, revoke, proof,
   };
 }
