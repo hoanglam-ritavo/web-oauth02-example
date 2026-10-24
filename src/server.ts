@@ -1,11 +1,11 @@
-﻿import "dotenv/config";
+﻿import { loadEnvironment } from "./environment.js";
 import { readConfig } from "./config.js";
 import { createApp } from "./app.js";
 
 try {
-  const config = readConfig(process.env);
-  const server = createApp(config).listen(config.port, "127.0.0.1", () => {
-    console.log("OAuth example listening at " + config.appUrl);
+  const config = readConfig(loadEnvironment());
+  const server = createApp(config).listen(config.port, config.host, () => {
+    console.log(`OAuth example (${config.mode}) listening at ${config.host}:${config.port}`);
   });
   server.on("error", () => {
     console.error("Unable to start OAuth example HTTP server.");

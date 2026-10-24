@@ -1,14 +1,14 @@
 import type { Request, RequestHandler, Response } from "express";
-import type { Config } from "../config.js";
+import type { WebConfig } from "../config.js";
 import type { Identity } from "./oauth-client.js";
 import { OAuthSessions, keyHash } from "./oauth-sessions.js";
 
 declare global { namespace Express { interface Request { auth?: Identity; browserId?: string } } }
 export const cookieName = "rita_example.key";
-export const sessionCookie = (config: Config) => ({
+export const sessionCookie = (config: WebConfig) => ({
   httpOnly: true, sameSite: "lax" as const, secure: config.secureCookie, path: "/",
 });
-export function createSessionMiddleware(config: Config, sessions: OAuthSessions): RequestHandler {
+export function createSessionMiddleware(config: WebConfig, sessions: OAuthSessions): RequestHandler {
   return (req, res, next) => {
     const cookies = (req.headers.cookie ?? "").split(";").map(value => value.trim());
     const values = cookies.filter(value => value.split("=", 1)[0] === cookieName);
@@ -23,7 +23,7 @@ export function createSessionMiddleware(config: Config, sessions: OAuthSessions)
     next();
   };
 }
-export function ensureBrowser(req: Request, res: Response, config: Config, sessions: OAuthSessions, now: () => number) {
+export function ensureBrowser(req: Request, res: Response, config: WebConfig, sessions: OAuthSessions, now: () => number) {
   if (!sessions.browser(req.browserId)) {
     const created = sessions.create();
     req.browserId = created.id;
@@ -31,7 +31,7 @@ export function ensureBrowser(req: Request, res: Response, config: Config, sessi
   }
   return sessions.browser(req.browserId)!;
 }
-export function setBrowserCookie(res: Response, config: Config, key: string, maxAge: number) {
+export function setBrowserCookie(res: Response, config: WebConfig, key: string, maxAge: number) {
   res.cookie(cookieName, key, { ...sessionCookie(config), maxAge: Math.max(0, maxAge) });
 }
-export const clearBrowserCookie = (res: Response, config: Config) => res.clearCookie(cookieName, sessionCookie(config));
+export const clearBrowserCookie = (res: Response, config: WebConfig) => res.clearCookie(cookieName, sessionCookie(config));

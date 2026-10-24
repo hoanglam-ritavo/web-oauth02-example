@@ -6,7 +6,7 @@ import express from "express";
 import request from "supertest";
 import { RitaAuthGuard } from "../src/auth/rita-auth.guard.js";
 import { createSessionMiddleware, setBrowserCookie } from "../src/auth/session.js";
-import { readConfig } from "../src/config.js";
+import { readWebConfig as readConfig } from "./web-config.js";
 
 const oauth = {
   async exchange(): Promise<never> { throw new Error("Unexpected exchange"); },

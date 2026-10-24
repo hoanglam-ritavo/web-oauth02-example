@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import request from "supertest";
 import { createApp } from "../src/app.js";
-import { readConfig } from "../src/config.js";
+import { readWebConfig as readConfig } from "./web-config.js";
 
 const config = readConfig({
   RITA_CLIENT_ID: "demo-client", RITA_CLIENT_SECRET: "demo-secret",

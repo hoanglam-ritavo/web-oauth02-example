@@ -1,6 +1,6 @@
 # Login and guard
 
-[README](../../README.md) | [Architecture](../../ARCHITECTURE.md)
+[README](../../../README.md) | [Architecture](../../../ARCHITECTURE.md)
 
 1. SPA requests GET /api/session. Backend returns an anonymous CSRF token and sets the HttpOnly cookie key when needed.
 2. GET /auth/login stores state, verifier, expiry and one-use/cancellation flags in the same RAM entry.
@@ -21,3 +21,11 @@ The 503-and-retain behavior described in the [refresh flow](03-refresh-and-sessi
 
 A protected API cannot authenticate from an arbitrary Bearer header; it must resolve the browser cookie entry.
 Use the shared RitaAuthGuard before business handlers, and add business-specific permissions and CSRF for write endpoints.
+
+## Participants and prerequisites
+
+Browser SPA, example backend and Rita ID participate in this flow. Enable web or both mode and configure the confidential client and exact callback using the [deployment guide](../../deployment.md). Protected resources require an authenticated cookie entry; refresh/logout also enforce their documented CSRF rules.
+
+## Implementation and evidence
+
+See [implementation](../../../src/auth/rita-auth.strategy.ts), [flow regression](../../../test/app.test.ts), [cookie/SPA tests](../../../test/cookie-spa.test.ts) and [Chrome smoke](../../../test/browser-smoke.mjs). These use fictional providers; [current verification](../../TEST-MATRIX.md#current-verification-status) distinguishes executed checks from live acceptance.

@@ -6,7 +6,7 @@ import request from "supertest";
 import { generateKeyPair, SignJWT, createLocalJWKSet, exportJWK } from "jose";
 import { createApp } from "../src/app.js";
 import { createOAuthClient } from "./provider-fixture.js";
-import { readConfig } from "../src/config.js";
+import { readWebConfig as readConfig } from "./web-config.js";
 
 const keys = await generateKeyPair("RS256");
 const key = createLocalJWKSet({ keys: [{ ...await exportJWK(keys.publicKey), kid: "demo", alg: "RS256" }] });

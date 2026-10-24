@@ -1,5 +1,5 @@
 {
-  "name": "rita-oauth-example",
+  "name": "oauth-02-web-integration-example",
   "version": "1.0.0",
   "private": true,
   "type": "module",
@@ -13,7 +13,13 @@
     "typecheck": "tsc --noEmit",
     "test": "tsx --test test/*.test.ts",
     "test:browser": "npm run build && node test/browser-smoke.mjs",
-    "lint": "eslint ."
+    "test:mobile-compat": "tsx scripts/test-mobile-compat.mjs",
+    "docs:check": "tsx --test test/docs-check.test.ts && node scripts/check-docs.mjs",
+    "lint": "eslint .",
+    "dev:web": "tsx watch src/server.ts --profile=web",
+    "dev:mobile": "tsx watch src/server.ts --profile=mobile",
+    "start:web": "node dist/server.js --profile=web",
+    "start:mobile": "node dist/server.js --profile=mobile"
   },
   "dependencies": {
     "axios": "^1.20.0",

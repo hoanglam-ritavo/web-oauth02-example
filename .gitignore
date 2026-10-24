@@ -2,6 +2,11 @@
 dist/
 .env
 .env.*
-!.env.example
+.web.env
+.web.env.*
+.mobile.env
+.mobile.env.*
+!.web.env.example
+!.mobile.env.example
 coverage/
 
